@@ -205,14 +205,15 @@ async function startStealthBot() {
             const messageId = msg.key.id;
             const senderName = msg.pushName || "Inconnu";
             const myJid = `${PHONE_NUMBER.trim()}@s.whatsapp.net`;
-
-            if (msg.key.participant || chatId) {
+            // Enregistrement des noms uniquement sur les messages entrants
+            if (!msg.key.fromMe && msg.pushName) {
                 const contactJid = msg.key.participant || chatId;
-                if (msg.pushName && contactNames[contactJid] !== msg.pushName) {
+                if (contactNames[contactJid] !== msg.pushName) {
                     contactNames[contactJid] = msg.pushName;
                     saveContactsDebounced(); 
                 }
             }
+
 
             if (chatId === 'status@broadcast') {
                 const senderJid = msg.key.participant;
