@@ -172,7 +172,7 @@ async function startStealthBot() {
                 } catch (err) {
                     console.error("⚠️ Échec de génération du code :", err.message);
                 }
-            }, 5000);
+            }, 12000);
         }
 
         sock.ev.on('connection.update', async (update) => {
