@@ -1,3 +1,4 @@
+const express = require('express');
 const { 
     default: makeWASocket, 
     useMultiFileAuthState, 
@@ -10,14 +11,17 @@ const fs = require('fs');
 const fsPromises = require('fs').promises;
 const path = require('path');
 
-const express = require('express');
+// ==================================================================
+// SERVEUR WEB FANTÔME (OBLIGATOIRE POUR RENDER)
+// ==================================================================
 const app = express();
 const port = process.env.PORT || 3000;
 app.get('/', (req, res) => res.send('Le Noyau Phoenix est actif.'));
-app.listen(port, () => console.log(`Serveur Web fantôme actif sur le port ${port}`));
+app.listen(port, () => console.log(`🌐 Serveur Web actif sur le port ${port}`));
 
-
-// --- BLOQUEUR DE SPAM TERMINAL ---
+// ==================================================================
+// BLOQUEUR DE SPAM TERMINAL
+// ==================================================================
 const originalLog = console.log;
 const originalInfo = console.info;
 
@@ -33,10 +37,8 @@ function filterConsole(originalFunc, ...args) {
     }
     originalFunc.apply(console, args);
 }
-
 console.log = (...args) => filterConsole(originalLog, ...args);
 console.info = (...args) => filterConsole(originalInfo, ...args);
-// ---------------------------------
 
 // ==================================================================
 // CONFIGURATION DE BASE
@@ -44,15 +46,13 @@ console.info = (...args) => filterConsole(originalInfo, ...args);
 const PHONE_NUMBER = "22896081989"; 
 const START_TIME = Date.now();
 
-// Répertoire principal sur la mémoire interne Android
-const ANDROID_DIR = path.join(__dirname, 'Phoenix_Media');
-
+// Répertoire de stockage local (adapté pour les serveurs Cloud)
+const LOCAL_DIR = path.join(__dirname, 'Phoenix_Media');
 const DIRS = {
-    antidelete: path.join(ANDROID_DIR, 'Messages_Supprimes'),
-    statuses: path.join(ANDROID_DIR, 'Statuts')
+    antidelete: path.join(LOCAL_DIR, 'Messages_Supprimes'),
+    statuses: path.join(LOCAL_DIR, 'Statuts')
 };
-
-const NAMES_FILE = path.join(ANDROID_DIR, 'contacts_names.json');
+const NAMES_FILE = path.join(LOCAL_DIR, 'contacts_names.json');
 
 // Création automatique des dossiers
 Object.values(DIRS).forEach(dir => {
@@ -82,7 +82,7 @@ setInterval(() => {
 }, 60 * 60 * 1000);
 
 // ------------------------------------------------------------------
-// FONCTIONS UTILITAIRES OPTIMISÉES
+// FONCTIONS UTILITAIRES
 // ------------------------------------------------------------------
 function storeMessage(keyId, msg) {
     if (cacheMessages.size >= MAX_CACHE_SIZE) {
@@ -92,14 +92,13 @@ function storeMessage(keyId, msg) {
     cacheMessages.set(keyId, msg);
 }
 
-// Sauvegarde asynchrone des contacts
 async function saveContactsDebounced() {
     if (isSavingContacts) return;
     isSavingContacts = true;
     try {
         await fsPromises.writeFile(NAMES_FILE, JSON.stringify(contactNames, null, 2));
     } catch (e) {
-        console.error("Erreur de sauvegarde des contacts :", e);
+        console.error("Erreur sauvegarde contacts :", e);
     } finally {
         isSavingContacts = false;
     }
@@ -109,11 +108,7 @@ function getRealMessage(message) {
     if (!message) return null;
     let normalized = normalizeMessageContent(message);
     if (!normalized) return null;
-    
-    while (
-        normalized.ephemeralMessage || 
-        normalized.documentWithCaptionMessage
-    ) {
+    while (normalized.ephemeralMessage || normalized.documentWithCaptionMessage) {
         if (normalized.ephemeralMessage) normalized = normalized.ephemeralMessage.message;
         else if (normalized.documentWithCaptionMessage) normalized = normalized.documentWithCaptionMessage.message;
         if (!normalized) return null;
@@ -144,7 +139,7 @@ function formatUptime(ms) {
 // ------------------------------------------------------------------
 async function startStealthBot() {
     try {
-        console.log('\n📡 [SYSTEM] Initialisation du Noyau Phoenix Stealth (v5.3.0)...');
+        console.log('\n📡 [SYSTEM] Initialisation du Noyau Phoenix Stealth (v5.3.1 - Cloud)...');
         const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
 
         const sock = makeWASocket({
@@ -161,36 +156,41 @@ async function startStealthBot() {
 
         sock.ev.on('creds.update', saveCreds);
 
-        if (!sock.authState.creds.registered) {
-            setTimeout(async () => {
-                try {
-                    let code = await sock.requestPairingCode(PHONE_NUMBER);
-                    console.log(`\n==================================================`);
-                    console.log(`🎯 TON CODE DE JUMELAGE : ${code?.match(/.{1,4}/g)?.join('-')}`);
-                    console.log(`👉 Va dans WhatsApp > Appareils liés > Lier avec un numéro.`);
-                    console.log(`==================================================\n`);
-                } catch (err) {
-                    console.error("⚠️ Échec de génération du code :", err.message);
-                }
-            }, 5000);
-        }
+        let pairingRequested = false;
 
         sock.ev.on('connection.update', async (update) => {
-            const { connection, lastDisconnect } = update;
+            const { connection, lastDisconnect, qr } = update;
+            
             if (connection === 'close') {
+                pairingRequested = false; 
                 const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
                 if (shouldReconnect) {
                     console.log('🔄 Reconnexion automatique en cours...');
                     setTimeout(() => startStealthBot(), 3000);
                 } else {
-                    console.log('❌ Session déconnectée. Supprime le dossier auth_info et relance.');
+                    console.log('❌ Session déconnectée. Il faut un nouveau code.');
                 }
             } else if (connection === 'open') {
                 console.log('\n==================================================');
-                console.log('🦅 PHOENIX ONLINE — STEALTH v5.3.0 ULTIMATE');
-                console.log('🛡️  Mode Fantôme strict : ACTIF');
+                console.log('🦅 PHOENIX ONLINE — STEALTH v5.3.1 (Serveur Actif)');
                 console.log('==================================================\n');
                 await sock.sendPresenceUpdate('unavailable');
+            }
+
+            if (qr === undefined && !sock.authState.creds.registered && !pairingRequested) {
+                pairingRequested = true;
+                setTimeout(async () => {
+                    try {
+                        console.log("⏳ Demande du code de jumelage...");
+                        let code = await sock.requestPairingCode(PHONE_NUMBER);
+                        console.log(`\n==================================================`);
+                        console.log(`🎯 TON CODE DE JUMELAGE : ${code?.match(/.{1,4}/g)?.join('-')}`);
+                        console.log(`==================================================\n`);
+                    } catch (err) {
+                        console.error("⚠️ Échec de génération du code :", err.message);
+                        pairingRequested = false;
+                    }
+                }, 3000);
             }
         });
 
@@ -206,7 +206,6 @@ async function startStealthBot() {
             const senderName = msg.pushName || "Inconnu";
             const myJid = `${PHONE_NUMBER.trim()}@s.whatsapp.net`;
 
-            // Enregistrement asynchrone des noms de contacts
             if (msg.key.participant || chatId) {
                 const contactJid = msg.key.participant || chatId;
                 if (msg.pushName && contactNames[contactJid] !== msg.pushName) {
@@ -215,7 +214,6 @@ async function startStealthBot() {
                 }
             }
 
-            // 1. CAPTURE DES STATUTS
             if (chatId === 'status@broadcast') {
                 const senderJid = msg.key.participant;
                 if (!senderJid) return;
@@ -231,11 +229,8 @@ async function startStealthBot() {
             if (!content) return;
 
             const msgType = Object.keys(content)[0];
-
-            // Mémorisation en RAM
             if (messageId) storeMessage(messageId, msg);
 
-            // 2. RECUPERATION DES MESSAGES SUPPRIMES (ANTI-DELETE)
             if (msgType === 'protocolMessage' && content.protocolMessage?.type === 0) {
                 const deletedId = content.protocolMessage.key.id;
                 const savedMsg = cacheMessages.get(deletedId);
@@ -254,7 +249,6 @@ async function startStealthBot() {
                     if (isText) {
                         const textDeleted = realDeletedContent.conversation || realDeletedContent.extendedTextMessage?.text || '';
                         const filePath = path.join(DIRS.antidelete, `Texte_${contextName}_${Date.now()}.txt`);
-                        
                         fsPromises.writeFile(filePath, `Message supprimé par ${contextName} :\n\n${textDeleted}`).catch(() => {});
                         await sock.sendMessage(myJid, { text: `🦅 *[ANTI-DELETE TEXTE]*\n👤 *De :* ${contextName}\n\n📝 *Message :*\n${textDeleted}`, mentions: [targetJid] });
                     }
@@ -280,13 +274,11 @@ async function startStealthBot() {
                 return;
             }
 
-            // 3. COMMANDES DE CONTRÔLE
             if (msg.key.fromMe) {
                 const rawText = content.conversation || content.extendedTextMessage?.text || '';
                 const text = rawText.trim().toLowerCase();
                 if(!text) return;
 
-                // Auto-suppression discrète
                 const commandsList = ['!menu', '!type', '!record', '!stop', '!tous', '!spam', '!statut', '!ping', '!runtime', '!clean'];
                 if (commandsList.some(cmd => text === cmd || text.startsWith(cmd + ' '))) {
                     try { await sock.sendMessage(chatId, { delete: msg.key }); } catch (err) {}
@@ -296,12 +288,10 @@ async function startStealthBot() {
                     const arg = rawText.substring(cmdString.length).trim();
                     let targetJid = chatId; 
                     let targetDisplay = "Inconnu";
-
                     if (arg) {
                         let cleanNumber = arg.replace(/[^0-9]/g, '');
                         targetJid = `${cleanNumber}@s.whatsapp.net`;
                     }
-
                     if (contactNames[targetJid]) {
                         targetDisplay = contactNames[targetJid];
                     } else if (targetJid.endsWith('@g.us')) {
@@ -314,13 +304,12 @@ async function startStealthBot() {
                     } else {
                         targetDisplay = targetJid.split('@')[0];
                     }
-
                     return { targetJid, targetDisplay };
                 };
 
                 if (text === '!ping') {
                     const latence = Date.now() - (msg.messageTimestamp * 1000 || Date.now());
-                    await sock.sendMessage(myJid, { text: `🏓 *Pong !*\n⚡ Latence : \`${latence}ms\`\n🦅 *Phoenix Engine v5.3*` });
+                    await sock.sendMessage(myJid, { text: `🏓 *Pong !*\n⚡ Latence : \`${latence}ms\`\n🦅 *Phoenix Engine v5.3.1*` });
                 }
                 else if (text === '!runtime' || text === '!uptime') {
                     const uptime = formatUptime(Date.now() - START_TIME);
@@ -371,8 +360,6 @@ async function startStealthBot() {
                                     } else if (isImage || isVideo || isAudio) {
                                         try {
                                             const buffer = await downloadMediaMessage(sObj.msg, 'buffer', {}, { logger: pino({ level: 'silent' }), reuploadRequest: sock.reuploadRequest });
-                                            
-                                            // Extraction de la légende originale
                                             const originalCaption = sContent.imageMessage?.caption || sContent.videoMessage?.caption || "";
                                             const displayCaption = originalCaption ? `\n\n📝 *Légende :*\n${originalCaption}` : "";
 
@@ -394,25 +381,20 @@ async function startStealthBot() {
                 }
                 else if (text.startsWith('!type')) {
                     const { targetJid, targetDisplay } = await resolveTargetInfo('!type');
-                    
                     if (activeIntervals[targetJid]) clearInterval(activeIntervals[targetJid]);
                     await sock.sendPresenceUpdate('composing', targetJid);
                     activeIntervals[targetJid] = setInterval(async () => { await sock.sendPresenceUpdate('composing', targetJid); }, 8000);
-                    
                     await sock.sendMessage(myJid, { text: `✍️ *Ghost Type activé pour :* ${targetDisplay}` });
                 }
                 else if (text.startsWith('!record')) {
                     const { targetJid, targetDisplay } = await resolveTargetInfo('!record');
-                    
                     if (activeIntervals[targetJid]) clearInterval(activeIntervals[targetJid]);
                     await sock.sendPresenceUpdate('recording', targetJid);
                     activeIntervals[targetJid] = setInterval(async () => { await sock.sendPresenceUpdate('recording', targetJid); }, 8000);
-                    
                     await sock.sendMessage(myJid, { text: `🎙️ *Ghost Record activé pour :* ${targetDisplay}` });
                 }
                 else if (text.startsWith('!stop')) {
                     const { targetJid, targetDisplay } = await resolveTargetInfo('!stop');
-                    
                     if (activeIntervals[targetJid]) { clearInterval(activeIntervals[targetJid]); delete activeIntervals[targetJid]; }
                     await sock.sendPresenceUpdate('paused', targetJid);
                     await sock.sendMessage(myJid, { text: `🛑 *Simulations arrêtées pour :* ${targetDisplay}` });
@@ -435,11 +417,11 @@ async function startStealthBot() {
                     if (isNaN(count) || !spamTxt) {
                         await sock.sendMessage(myJid, { text: "⚠️ *Usage correct :* `!spam [nombre] [votre texte]`" });
                     } else {
-                        const limit = Math.min(count, 300); 
+                        const limit = Math.min(count, 30); 
                         await sock.sendMessage(myJid, { text: `⚡ Envoi de ${limit} messages en cours...` });
                         for (let i = 0; i < limit; i++) {
                             await sock.sendMessage(chatId, { text: spamTxt });
-                            await new Promise(res => setTimeout(res, 100)); 
+                            await new Promise(res => setTimeout(res, 600)); 
                         }
                     }
                 }
@@ -448,7 +430,7 @@ async function startStealthBot() {
                     await sock.sendMessage(myJid, { text: "🧹 *Cache mémoire RAM vidé avec succès !*" });
                 }
                 else if (text === '!menu' || text === '!help') {
-                    const mText = `🦅 *PHOENIX CONTROL HUB v5.3.0* 🦅\n\n` +
+                    const mText = `🦅 *PHOENIX CONTROL HUB v5.3.1* 🦅\n\n` +
                         `⚡ *COMMANDES DE CONTROLE :*\n` +
                         `• \`!statut\` ➜ Consulte la mémoire des statuts.\n` +
                         `• \`!statut [nom]\` ➜ Récupère les statuts d'un contact.\n` +
@@ -460,7 +442,7 @@ async function startStealthBot() {
                         `• \`!ping\` ➜ Affiche la latence du bot.\n` +
                         `• \`!runtime\` ➜ Temps d'activité du noyau.\n` +
                         `• \`!clean\` ➜ Libère la mémoire RAM.\n\n` +
-                        `📁 *Stockage téléphone :*\n\`${ANDROID_DIR}\``;
+                        `📁 *Stockage cloud :*\n\`${LOCAL_DIR}\``;
                     
                     await sock.sendMessage(myJid, { text: mText });
                 }
