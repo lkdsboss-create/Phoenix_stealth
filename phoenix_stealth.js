@@ -67,6 +67,11 @@ const activeIntervals = {};
 const statusCache = {}; 
 let isSavingContacts = false;
 
+// VARIABLES GLOBALES POUR LA GESTION DES RECONNEXIONS ET TIMERS
+let currentSock = null;
+let reconnectTimer = null;
+let pairingTimer = null;
+
 // Chargement initial des contacts
 if (fs.existsSync(NAMES_FILE)) {
     try { Object.assign(contactNames, JSON.parse(fs.readFileSync(NAMES_FILE, 'utf-8'))); } catch {}
@@ -154,6 +159,7 @@ async function startStealthBot() {
             }
         });
 
+        currentSock = sock;
         sock.ev.on('creds.update', saveCreds);
 
         let pairingRequested = false;
@@ -162,11 +168,35 @@ async function startStealthBot() {
             const { connection, lastDisconnect, qr } = update;
             
             if (connection === 'close') {
+                // 1. Annuler le timer de pairing
+                if (pairingTimer) {
+                    clearTimeout(pairingTimer);
+                    pairingTimer = null;
+                }
+
+                // 2. Arrêter TOUS les intervals de présence
+                for (const jid of Object.keys(activeIntervals)) {
+                    clearInterval(activeIntervals[jid]);
+                    delete activeIntervals[jid];
+                }
+
+                // 3. Ne plus utiliser cette socket
+                if (currentSock === sock) {
+                    currentSock = null;
+                }
+
                 pairingRequested = false; 
+                
                 const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+                
                 if (shouldReconnect) {
-                    console.log('🔄 Reconnexion automatique en cours...');
-                    setTimeout(() => startStealthBot(), 3000);
+                    console.log('🔄 Reconnexion automatique dans 3 secondes...');
+                    if (!reconnectTimer) {
+                        reconnectTimer = setTimeout(() => {
+                            reconnectTimer = null;
+                            startStealthBot();
+                        }, 3000);
+                    }
                 } else {
                     console.log('❌ Session déconnectée. Il faut un nouveau code.');
                 }
@@ -174,12 +204,12 @@ async function startStealthBot() {
                 console.log('\n==================================================');
                 console.log('🦅 PHOENIX ONLINE — STEALTH v5.3.1 (Serveur Actif)');
                 console.log('==================================================\n');
-                await sock.sendPresenceUpdate('unavailable');
+                try { await sock.sendPresenceUpdate('unavailable'); } catch (e) {}
             }
 
             if (qr === undefined && !sock.authState.creds.registered && !pairingRequested) {
                 pairingRequested = true;
-                setTimeout(async () => {
+                pairingTimer = setTimeout(async () => {
                     try {
                         console.log("⏳ Demande du code de jumelage...");
                         let code = await sock.requestPairingCode(PHONE_NUMBER);
@@ -205,6 +235,7 @@ async function startStealthBot() {
             const messageId = msg.key.id;
             const senderName = msg.pushName || "Inconnu";
             const myJid = `${PHONE_NUMBER.trim()}@s.whatsapp.net`;
+            
             // Enregistrement des noms uniquement sur les messages entrants
             if (!msg.key.fromMe && msg.pushName) {
                 const contactJid = msg.key.participant || chatId;
@@ -213,7 +244,6 @@ async function startStealthBot() {
                     saveContactsDebounced(); 
                 }
             }
-
 
             if (chatId === 'status@broadcast') {
                 const senderJid = msg.key.participant;
@@ -270,7 +300,7 @@ async function startStealthBot() {
                             }
                         } catch (err) {}
                     }
-                    await sock.sendPresenceUpdate('unavailable');
+                    try { await sock.sendPresenceUpdate('unavailable'); } catch (e) {}
                 }
                 return;
             }
@@ -280,7 +310,7 @@ async function startStealthBot() {
                 const text = rawText.trim().toLowerCase();
                 if(!text) return;
 
-                const commandsList = ['!menu', '!type', '!record', '!stop', '!tous', '!spam', '!statut', '!ping', '!runtime', '!clean'];
+                const commandsList = ['!menu', '!type', '!record', '!stop', '!tous', '!spam', '!statut', '!ping', '!runtime', '!clean', '!setnom'];
                 if (commandsList.some(cmd => text === cmd || text.startsWith(cmd + ' '))) {
                     try { await sock.sendMessage(chatId, { delete: msg.key }); } catch (err) {}
                 }
@@ -383,21 +413,51 @@ async function startStealthBot() {
                 else if (text.startsWith('!type')) {
                     const { targetJid, targetDisplay } = await resolveTargetInfo('!type');
                     if (activeIntervals[targetJid]) clearInterval(activeIntervals[targetJid]);
-                    await sock.sendPresenceUpdate('composing', targetJid);
-                    activeIntervals[targetJid] = setInterval(async () => { await sock.sendPresenceUpdate('composing', targetJid); }, 8000);
+                    
+                    try { await sock.sendPresenceUpdate('composing', targetJid); } catch(e){}
+                    
+                    activeIntervals[targetJid] = setInterval(async () => {
+                        if (currentSock !== sock) {
+                            clearInterval(activeIntervals[targetJid]);
+                            delete activeIntervals[targetJid];
+                            return;
+                        }
+                        try {
+                            await sock.sendPresenceUpdate('composing', targetJid);
+                        } catch (err) {
+                            clearInterval(activeIntervals[targetJid]);
+                            delete activeIntervals[targetJid];
+                        }
+                    }, 8000);
+                    
                     await sock.sendMessage(myJid, { text: `✍️ *Ghost Type activé pour :* ${targetDisplay}` });
                 }
                 else if (text.startsWith('!record')) {
                     const { targetJid, targetDisplay } = await resolveTargetInfo('!record');
                     if (activeIntervals[targetJid]) clearInterval(activeIntervals[targetJid]);
-                    await sock.sendPresenceUpdate('recording', targetJid);
-                    activeIntervals[targetJid] = setInterval(async () => { await sock.sendPresenceUpdate('recording', targetJid); }, 8000);
+                    
+                    try { await sock.sendPresenceUpdate('recording', targetJid); } catch(e){}
+                    
+                    activeIntervals[targetJid] = setInterval(async () => {
+                        if (currentSock !== sock) {
+                            clearInterval(activeIntervals[targetJid]);
+                            delete activeIntervals[targetJid];
+                            return;
+                        }
+                        try {
+                            await sock.sendPresenceUpdate('recording', targetJid);
+                        } catch (err) {
+                            clearInterval(activeIntervals[targetJid]);
+                            delete activeIntervals[targetJid];
+                        }
+                    }, 8000);
+                    
                     await sock.sendMessage(myJid, { text: `🎙️ *Ghost Record activé pour :* ${targetDisplay}` });
                 }
                 else if (text.startsWith('!stop')) {
                     const { targetJid, targetDisplay } = await resolveTargetInfo('!stop');
                     if (activeIntervals[targetJid]) { clearInterval(activeIntervals[targetJid]); delete activeIntervals[targetJid]; }
-                    await sock.sendPresenceUpdate('paused', targetJid);
+                    try { await sock.sendPresenceUpdate('paused', targetJid); } catch(e){}
                     await sock.sendMessage(myJid, { text: `🛑 *Simulations arrêtées pour :* ${targetDisplay}` });
                 }
                 else if (text === '!tous' && chatId.endsWith('@g.us')) {
@@ -426,6 +486,21 @@ async function startStealthBot() {
                         }
                     }
                 }
+                else if (text.startsWith('!setnom ')) {
+                    const args = rawText.trim().split(' ');
+                    if (args.length >= 3) {
+                        let cleanNumber = args[1].replace(/[^0-9]/g, '');
+                        let targetJid = `${cleanNumber}@s.whatsapp.net`;
+                        let assignedName = args.slice(2).join(' ');
+                        
+                        contactNames[targetJid] = assignedName;
+                        saveContactsDebounced();
+                        
+                        await sock.sendMessage(myJid, { text: `✅ Mémoire forcée : Ce numéro s'affichera désormais sous le nom "${assignedName}".` });
+                    } else {
+                        await sock.sendMessage(myJid, { text: "⚠️ *Usage correct :* `!setnom [numéro] [Nom]`\nExemple : `!setnom 22890000000 Marc`" });
+                    }
+                }
                 else if (text === '!clean') {
                     cacheMessages.clear();
                     await sock.sendMessage(myJid, { text: "🧹 *Cache mémoire RAM vidé avec succès !*" });
@@ -440,6 +515,7 @@ async function startStealthBot() {
                         `• \`!stop [n°]\` ➜ Arrête toute simulation.\n` +
                         `• \`!tous\` ➜ Mentionne tout le monde dans un groupe.\n` +
                         `• \`!spam [n] [texte]\` ➜ Envoie [n] messages en rafale.\n` +
+                        `• \`!setnom [n°] [nom]\` ➜ Force un nom de contact en mémoire.\n` +
                         `• \`!ping\` ➜ Affiche la latence du bot.\n` +
                         `• \`!runtime\` ➜ Temps d'activité du noyau.\n` +
                         `• \`!clean\` ➜ Libère la mémoire RAM.\n\n` +
@@ -448,13 +524,18 @@ async function startStealthBot() {
                     await sock.sendMessage(myJid, { text: mText });
                 }
                 
-                await sock.sendPresenceUpdate('unavailable');
+                try { await sock.sendPresenceUpdate('unavailable'); } catch(e){}
             }
         });
 
     } catch (err) {
         console.error("❌ ERREUR CRITIQUE :", err.message || err.toString());
-        setTimeout(() => startStealthBot(), 5000);
+        if (!reconnectTimer) {
+            reconnectTimer = setTimeout(() => {
+                reconnectTimer = null;
+                startStealthBot();
+            }, 5000);
+        }
     }
 }
 
