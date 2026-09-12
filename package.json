@@ -1,0 +1,13 @@
+{
+  "name": "phoenix-bot",
+  "version": "5.3.0",
+  "main": "phoenix_stealth.js",
+  "scripts": {
+    "start": "node phoenix_stealth.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.0",
+    "express": "^4.22.2",
+    "pino": "^8.0.0"
+  }
+}
