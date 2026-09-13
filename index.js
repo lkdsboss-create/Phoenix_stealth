@@ -5,6 +5,8 @@ const pino = require('pino');
 const fs = require('fs');
 const path = require('path');
 const { handleMessages } = require('./core/messages');
+const { handleMessages, handleReceipts } = require('./core/messages');
+
 
 // ==========================================
 // SERVEUR RENDER & BLOQUEUR DE LOGS
@@ -114,6 +116,10 @@ async function startStealthBot() {
         sock.ev.on('messages.upsert', async (m) => {
             await handleMessages(sock, m, botState);
         });
+        sock.ev.on('message-receipt.update', (events) => {
+            handleReceipts(events, botState);
+        });
+        
 
     } catch (err) {
         if (!reconnectTimer) reconnectTimer = setTimeout(() => { reconnectTimer = null; startStealthBot(); }, 5000);
