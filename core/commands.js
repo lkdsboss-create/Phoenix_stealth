@@ -59,14 +59,14 @@ async function handleCommands(sock, msg, content, chatId, myJid, botState) {
         await sock.sendMessage(myJid, { text: "🧹 *Cache mémoire vidé !*" });
     }
     else if (text === '!menu' || text === '!help') {
-        const mText = `🦅 *PHOENIX CONTROL HUB v5.4.1* 🦅\n\n` +
+        const mText = `🦅 *PHOENIX CONTROL HUB v5.4.2* 🦅\n\n` +
             `⚡ *COMMANDES DE CONTROLE :*\n` +
             `• \`!statut\` ➜ Consulte la mémoire des statuts non lus.\n` +
             `• \`!statut [nom]\` ➜ Récupère les statuts d'un contact.\n` +
             `• \`!type [n°]\` ➜ Simule "Écrit..." en continu.\n` +
             `• \`!record [n°]\` ➜ Simule "Enregistre un vocal...".\n` +
             `• \`!stop [n°]\` ➜ Arrête toute simulation.\n` +
-            `• \`!tous\` ➜ Mentionne tout le monde.\n` +
+            `• \`!tous [texte]\` ➜ Mentionne tout le monde (réponse supportée).\n` +
             `• \`!spam [n] [texte]\` ➜ Envoie [n] messages.\n` +
             `• \`!setnom [n°] [nom]\` ➜ Force un nom de contact.\n` +
             `• \`!ping\` ➜ Affiche la latence.\n` +
@@ -118,12 +118,34 @@ async function handleCommands(sock, msg, content, chatId, myJid, botState) {
         try { await sock.sendPresenceUpdate('paused', targetJid); } catch(e){}
         await sock.sendMessage(myJid, { text: `🛑 *Simulations arrêtées pour :* ${targetDisplay}` });
     }
-    else if (text === '!tous' && chatId.endsWith('@g.us')) {
+    else if (text.startsWith('!tous') && chatId.endsWith('@g.us')) {
         try {
             const metadata = await sock.groupMetadata(chatId);
-            let txt = `📢 *TAG GLOBAL* :\n\n`;
+            const customMsg = rawText.substring(5).trim();
+            
+            let txt = `📢 *TAG GLOBAL* :\n`;
+            if (customMsg) txt += `\n${customMsg}\n\n`;
+            else txt += `\n`;
+            
             metadata.participants.forEach((p, i) => { txt += `${i + 1}. @${p.id.split('@')[0]}\n`; });
-            await sock.sendMessage(chatId, { text: txt, mentions: metadata.participants.map(p => p.id) });
+
+            // Analyse si tu as répondu (cité) un message
+            let options = {};
+            const contextInfo = content.extendedTextMessage?.contextInfo;
+            
+            if (contextInfo && contextInfo.stanzaId) {
+                options.quoted = {
+                    key: {
+                        remoteJid: chatId,
+                        fromMe: jidNormalizedUser(contextInfo.participant) === myJid,
+                        id: contextInfo.stanzaId,
+                        participant: contextInfo.participant
+                    },
+                    message: contextInfo.quotedMessage
+                };
+            }
+
+            await sock.sendMessage(chatId, { text: txt, mentions: metadata.participants.map(p => p.id) }, options);
         } catch (e) {}
     }
     else if (text.startsWith('!statut')) {
@@ -201,3 +223,4 @@ async function handleCommands(sock, msg, content, chatId, myJid, botState) {
 }
 
 module.exports = { handleCommands };
+                    
