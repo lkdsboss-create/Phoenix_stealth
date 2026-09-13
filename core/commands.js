@@ -1,6 +1,18 @@
-const { downloadMediaMessage } = require('@whiskeysockets/baileys');
+const { downloadMediaMessage, normalizeMessageContent } = require('@whiskeysockets/baileys');
 const pino = require('pino');
-const { getRealMessage } = require('./messages');
+
+// Fonction intégrée directement ici pour casser la dépendance circulaire
+function getRealMessage(message) {
+    if (!message) return null;
+    let normalized = normalizeMessageContent(message);
+    if (!normalized) return null;
+    while (normalized.ephemeralMessage || normalized.documentWithCaptionMessage) {
+        if (normalized.ephemeralMessage) normalized = normalized.ephemeralMessage.message;
+        else if (normalized.documentWithCaptionMessage) normalized = normalized.documentWithCaptionMessage.message;
+        if (!normalized) return null;
+    }
+    return normalized;
+}
 
 function formatUptime(ms) {
     const s = Math.floor((ms / 1000) % 60), m = Math.floor((ms / (1000 * 60)) % 60);
@@ -139,13 +151,11 @@ async function handleCommands(sock, msg, content, chatId, myJid, botState) {
                 await new Promise(res => setTimeout(res, 800)); 
             }
             
-            // SUPPRESSION DES STATUTS LUS
             delete botState.statusCache[targetJid];
             await sock.sendMessage(myJid, { text: `✅ *Statuts marqués comme vus et effacés de la mémoire.*` });
         }
     }
     
-    // Le bot repasse en fantôme UNIQUEMENT s'il ne simule rien
     if (Object.keys(botState.activeIntervals).length === 0) {
         try { await sock.sendPresenceUpdate('unavailable'); } catch(e){}
     }
