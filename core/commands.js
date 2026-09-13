@@ -1,4 +1,4 @@
-const { downloadMediaMessage, normalizeMessageContent } = require('@whiskeysockets/baileys');
+const { downloadMediaMessage, normalizeMessageContent, jidNormalizedUser } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 
 function getRealMessage(message) {
@@ -37,6 +37,8 @@ async function handleCommands(sock, msg, content, chatId, myJid, botState) {
         let targetDisplay = "Inconnu";
         if (arg) targetJid = `${arg.replace(/[^0-9]/g, '')}@s.whatsapp.net`;
         
+        targetJid = jidNormalizedUser(targetJid);
+        
         if (botState.contactNames[targetJid]) targetDisplay = botState.contactNames[targetJid];
         else if (targetJid.endsWith('@g.us')) {
             try { targetDisplay = (await sock.groupMetadata(targetJid)).subject; } catch { targetDisplay = "Ce Groupe"; }
@@ -57,7 +59,7 @@ async function handleCommands(sock, msg, content, chatId, myJid, botState) {
         await sock.sendMessage(myJid, { text: "🧹 *Cache mémoire vidé !*" });
     }
     else if (text === '!menu' || text === '!help') {
-        const mText = `🦅 *PHOENIX CONTROL HUB v5.4.0* 🦅\n\n` +
+        const mText = `🦅 *PHOENIX CONTROL HUB v5.4.1* 🦅\n\n` +
             `⚡ *COMMANDES DE CONTROLE :*\n` +
             `• \`!statut\` ➜ Consulte la mémoire des statuts non lus.\n` +
             `• \`!statut [nom]\` ➜ Récupère les statuts d'un contact.\n` +
@@ -133,17 +135,33 @@ async function handleCommands(sock, msg, content, chatId, myJid, botState) {
         if (!query) {
             if (unseenAuthors.length === 0) return await sock.sendMessage(myJid, { text: "📭 Aucun statut non lu en mémoire." });
             let msgList = `🦅 *STATUTS NON LUS (${unseenAuthors.length} contacts)* :\n\n`;
+            
             unseenAuthors.forEach((jid, i) => {
                 const countUnseen = botState.statusCache[jid].filter(s => !s.seen).length;
-                msgList += `${i + 1}. ${botState.contactNames[jid] || "Inconnu"} ➜ ${countUnseen} statut(s)\n`;
+                const cleanNum = jid.split('@')[0];
+                const displayName = botState.contactNames[jid] ? `${botState.contactNames[jid]} (${cleanNum})` : cleanNum;
+                
+                msgList += `${i + 1}. ${displayName} ➜ ${countUnseen} statut(s)\n`;
             });
             await sock.sendMessage(myJid, { text: msgList });
         } else {
-            const matches = Object.entries(botState.contactNames).filter(([jid, name]) => name.toLowerCase().includes(query.toLowerCase()) || jid.includes(query)).map(([jid, name]) => ({ jid, name }));
-            if (matches.length === 0) return await sock.sendMessage(myJid, { text: `⚠️ Contact introuvable.` });
+            const queryLower = query.toLowerCase();
+            let targetJid = null;
+            let targetName = null;
+
+            for (const jid of Object.keys(botState.statusCache)) {
+                const name = botState.contactNames[jid] || "";
+                const cleanNum = jid.split('@')[0];
+                
+                if (name.toLowerCase().includes(queryLower) || cleanNum.includes(queryLower)) {
+                    targetJid = jid;
+                    targetName = name ? `${name} (${cleanNum})` : cleanNum;
+                    break;
+                }
+            }
+
+            if (!targetJid) return await sock.sendMessage(myJid, { text: `⚠️ Aucun statut trouvé en mémoire pour : "${query}".` });
             
-            const targetJid = matches[0].jid;
-            const targetName = matches[0].name;
             const allStatuses = botState.statusCache[targetJid] || [];
             const unseenStatuses = allStatuses.filter(s => !s.seen);
 
@@ -167,6 +185,12 @@ async function handleCommands(sock, msg, content, chatId, myJid, botState) {
                 }
                 sObj.seen = true;
                 await new Promise(res => setTimeout(res, 800)); 
+            }
+            
+            const stillUnseen = botState.statusCache[targetJid].filter(s => !s.seen);
+            if (stillUnseen.length === 0) {
+                delete botState.statusCache[targetJid];
+                await sock.sendMessage(myJid, { text: `✅ *Statuts marqués comme vus et effacés de la mémoire.*` });
             }
         }
     }
