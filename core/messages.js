@@ -17,14 +17,6 @@ function getRealMessage(message) {
     return normalized;
 }
 
-function getMediaExtension(realContent) {
-    if (!realContent) return 'bin';
-    if (realContent.imageMessage) return 'jpg';
-    if (realContent.videoMessage) return 'mp4';
-    if (realContent.audioMessage || realContent.pttMessage) return 'ogg';
-    return 'bin';
-}
-
 async function handleMessages(sock, m, botState) {
     const msg = m.messages[0];
     if (!msg || !msg.message) return;
@@ -33,11 +25,10 @@ async function handleMessages(sock, m, botState) {
     const messageId = msg.key.id;
     const myJid = `${botState.PHONE_NUMBER}@s.whatsapp.net`;
 
-    // DOSSIERS ANTI-DELETE
     const DIRS = { antidelete: path.join(botState.LOCAL_DIR, 'Messages_Supprimes') };
     if (!fs.existsSync(DIRS.antidelete)) fs.mkdirSync(DIRS.antidelete, { recursive: true });
 
-    // SAUVEGARDE DES NOMS
+    // Sauvegarde des noms
     if (!msg.key.fromMe && msg.pushName) {
         const contactJid = msg.key.participant || chatId;
         if (botState.contactNames[contactJid] !== msg.pushName) {
@@ -51,26 +42,35 @@ async function handleMessages(sock, m, botState) {
         }
     }
 
-    // CAPTURE DES STATUTS
+    // CAPTURE DES STATUTS (Ajout du flag seen: false)
     if (chatId === 'status@broadcast') {
         const senderJid = msg.key.participant;
         if (!senderJid) return;
         if (!botState.statusCache[senderJid]) botState.statusCache[senderJid] = [];
-        botState.statusCache[senderJid].push({ timestamp: msg.messageTimestamp || Math.floor(Date.now() / 1000), msg: msg });
+        
+        // On évite les doublons d'ID
+        const exists = botState.statusCache[senderJid].some(s => s.id === messageId);
+        if (!exists) {
+            botState.statusCache[senderJid].push({ 
+                id: messageId,
+                timestamp: msg.messageTimestamp || Math.floor(Date.now() / 1000), 
+                msg: msg,
+                seen: false 
+            });
+        }
         return;
     }
 
     const content = getRealMessage(msg.message);
     if (!content) return;
 
-    // MISE EN CACHE
     const msgType = Object.keys(content)[0];
     if (messageId) {
         if (botState.cacheMessages.size >= 3000) botState.cacheMessages.delete(botState.cacheMessages.keys().next().value);
         botState.cacheMessages.set(messageId, msg);
     }
 
-    // ANTI-DELETE LOGIC
+    // ANTI-DELETE
     if (msgType === 'protocolMessage' && content.protocolMessage?.type === 0) {
         const deletedId = content.protocolMessage.key.id;
         const savedMsg = botState.cacheMessages.get(deletedId);
@@ -106,10 +106,25 @@ async function handleMessages(sock, m, botState) {
         return;
     }
 
-    // ROUTAGE VERS LES COMMANDES
     if (msg.key.fromMe) {
         await handleCommands(sock, msg, content, chatId, myJid, botState);
     }
 }
 
-module.exports = { handleMessages, getRealMessage };
+// SYNCHRONISATION DES ACCUSÉS DE LECTURE (READ RECEIPTS)
+function handleReceipts(events, botState) {
+    for (const receipt of events) {
+        const targetId = receipt.key.id;
+        
+        // On parcourt la mémoire des statuts pour marquer vu = true
+        for (const jid in botState.statusCache) {
+            const item = botState.statusCache[jid].find(s => s.id === targetId);
+            if (item) {
+                item.seen = true;
+                break;
+            }
+        }
+    }
+}
+
+module.exports = { handleMessages, handleReceipts, getRealMessage };
