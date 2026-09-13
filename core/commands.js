@@ -59,7 +59,7 @@ async function handleCommands(sock, msg, content, chatId, myJid, botState) {
         await sock.sendMessage(myJid, { text: "🧹 *Cache mémoire vidé !*" });
     }
     else if (text === '!menu' || text === '!help') {
-        const mText = `🦅 *PHOENIX CONTROL HUB v5.4.3* 🦅\n\n` +
+        const mText = `🦅 *PHOENIX CONTROL HUB v5.4.4* 🦅\n\n` +
             `⚡ *COMMANDES DE CONTROLE :*\n` +
             `• \`!statut\` ➜ Consulte la mémoire des statuts non lus.\n` +
             `• \`!statut [nom]\` ➜ Récupère les statuts d'un contact.\n` +
@@ -169,7 +169,6 @@ async function handleCommands(sock, msg, content, chatId, myJid, botState) {
             let targetName = null;
             let unseenStatuses = [];
 
-            // RECHERCHE CROISÉE ROBUSTE (Ta logique)
             for (const [jid, statuses] of Object.entries(botState.statusCache)) {
                 const savedName = (botState.contactNames[jid] || "").toLowerCase();
                 const cleanNum = jid.split('@')[0];
@@ -191,20 +190,45 @@ async function handleCommands(sock, msg, content, chatId, myJid, botState) {
             if (unseenStatuses.length === 0) return await sock.sendMessage(myJid, { text: `🕵️‍♂️ Aucun statut non lu pour : ${targetName}` });
             
             await sock.sendMessage(myJid, { text: `🦅 *Envoi des statuts non lus de ${targetName}...*` });
+            
             for (let sObj of unseenStatuses) {
                 let sContent = getRealMessage(sObj.msg.message);
+                
+                // NOUVEAU LOG DE TRAÇAGE
+                console.log("🦅 STATUT TROUVÉ :", {
+                    jid: targetJid,
+                    id: sObj.msg?.key?.id,
+                    types: Object.keys(sObj.msg?.message || {}),
+                    contentTypes: sContent ? Object.keys(sContent) : []
+                });
+
                 if (!sContent) continue;
+                
                 let isText = !!(sContent.extendedTextMessage?.text || sContent.conversation);
                 let isImage = !!sContent.imageMessage;
                 let isVideo = !!sContent.videoMessage;
                 
-                if (isText) await sock.sendMessage(myJid, { text: `📝 *Statut*:\n${sContent.extendedTextMessage?.text || sContent.conversation}` });
-                else if (isImage || isVideo) {
+                if (isText) {
+                    await sock.sendMessage(myJid, { text: `📝 *Statut*:\n${sContent.extendedTextMessage?.text || sContent.conversation}` });
+                } else if (isImage || isVideo) {
                     try {
                         const buffer = await downloadMediaMessage(sObj.msg, 'buffer', {}, { logger: pino({ level: 'silent' }) });
                         if (isImage) await sock.sendMessage(myJid, { image: buffer });
                         else if (isVideo) await sock.sendMessage(myJid, { video: buffer });
-                    } catch (e) {}
+                    } catch (e) {
+                        // CAPTURE ET AFFICHAGE DE L'ERREUR DANS RENDER ET WHATSAPP
+                        console.error("❌ ERREUR ENVOI STATUT :", {
+                            nom: targetName,
+                            jid: targetJid,
+                            messageId: sObj.msg?.key?.id,
+                            erreur: e?.message,
+                            stack: e?.stack
+                        });
+                        
+                        await sock.sendMessage(myJid, {
+                            text: `❌ *Échec du statut de ${targetName}*\nErreur : ${e?.message || 'Expiration du média'}`
+                        });
+                    }
                 }
                 sObj.seen = true;
                 await new Promise(res => setTimeout(res, 800)); 
@@ -224,3 +248,4 @@ async function handleCommands(sock, msg, content, chatId, myJid, botState) {
 }
 
 module.exports = { handleCommands };
+                            
