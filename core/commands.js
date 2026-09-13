@@ -59,7 +59,7 @@ async function handleCommands(sock, msg, content, chatId, myJid, botState) {
         await sock.sendMessage(myJid, { text: "🧹 *Cache mémoire vidé !*" });
     }
     else if (text === '!menu' || text === '!help') {
-        const mText = `🦅 *PHOENIX CONTROL HUB v5.4.4* 🦅\n\n` +
+        const mText = `🦅 *PHOENIX CONTROL HUB v5.4.6* 🦅\n\n` +
             `⚡ *COMMANDES DE CONTROLE :*\n` +
             `• \`!statut\` ➜ Consulte la mémoire des statuts non lus.\n` +
             `• \`!statut [nom]\` ➜ Récupère les statuts d'un contact.\n` +
@@ -194,42 +194,48 @@ async function handleCommands(sock, msg, content, chatId, myJid, botState) {
             for (let sObj of unseenStatuses) {
                 let sContent = getRealMessage(sObj.msg.message);
                 
-                // NOUVEAU LOG DE TRAÇAGE
-                console.log("🦅 STATUT TROUVÉ :", {
-                    jid: targetJid,
-                    id: sObj.msg?.key?.id,
-                    types: Object.keys(sObj.msg?.message || {}),
-                    contentTypes: sContent ? Object.keys(sContent) : []
-                });
-
-                if (!sContent) continue;
+                if (!sContent) {
+                    await sock.sendMessage(myJid, { text: `⚠️ *Format Système* : Données absentes ou chiffrées (ID: ${sObj.msg?.key?.id}).` });
+                    sObj.seen = true;
+                    await new Promise(res => setTimeout(res, 800)); 
+                    continue;
+                }
                 
                 let isText = !!(sContent.extendedTextMessage?.text || sContent.conversation);
                 let isImage = !!sContent.imageMessage;
                 let isVideo = !!sContent.videoMessage;
+                let isAudio = !!(sContent.audioMessage || sContent.pttMessage);
+                let isReaction = !!sContent.reactionMessage;
+                let isNotification = !!sContent.statusNotificationMessage;
+                let isProtocol = !!sContent.protocolMessage;
                 
                 if (isText) {
                     await sock.sendMessage(myJid, { text: `📝 *Statut*:\n${sContent.extendedTextMessage?.text || sContent.conversation}` });
-                } else if (isImage || isVideo) {
+                } else if (isImage || isVideo || isAudio) {
                     try {
                         const buffer = await downloadMediaMessage(sObj.msg, 'buffer', {}, { logger: pino({ level: 'silent' }) });
-                        if (isImage) await sock.sendMessage(myJid, { image: buffer });
-                        else if (isVideo) await sock.sendMessage(myJid, { video: buffer });
+                        const mediaCaption = sContent.imageMessage?.caption || sContent.videoMessage?.caption || '';
+
+                        if (isImage) await sock.sendMessage(myJid, { image: buffer, caption: mediaCaption });
+                        else if (isVideo) await sock.sendMessage(myJid, { video: buffer, caption: mediaCaption });
+                        else if (isAudio) await sock.sendMessage(myJid, { audio: buffer, mimetype: 'audio/ogg; codecs=opus', ptt: true });
                     } catch (e) {
-                        // CAPTURE ET AFFICHAGE DE L'ERREUR DANS RENDER ET WHATSAPP
-                        console.error("❌ ERREUR ENVOI STATUT :", {
-                            nom: targetName,
-                            jid: targetJid,
-                            messageId: sObj.msg?.key?.id,
-                            erreur: e?.message,
-                            stack: e?.stack
-                        });
-                        
                         await sock.sendMessage(myJid, {
-                            text: `❌ *Échec du statut de ${targetName}*\nErreur : ${e?.message || 'Expiration du média'}`
+                            text: `❌ *Échec du statut de ${targetName}*\nErreur : Le média a expiré ou le téléchargement a été refusé par WhatsApp.`
                         });
                     }
+                } else if (isReaction) {
+                    const emoji = sContent.reactionMessage.text || 'un emoji';
+                    await sock.sendMessage(myJid, { text: `👀 *Réaction interceptée* :\nL'utilisateur a réagi à un statut avec : ${emoji}` });
+                } else if (isNotification) {
+                    await sock.sendMessage(myJid, { text: `⚙️ *Notification Système* : Mise à jour de statut/confidentialité détectée.` });
+                } else if (isProtocol) {
+                    await sock.sendMessage(myJid, { text: `🗑️ *Action Système* : L'utilisateur a probablement supprimé un statut ou révoqué un message.` });
+                } else {
+                    const unknownFormat = Object.keys(sContent).join(', ');
+                    await sock.sendMessage(myJid, { text: `⚠️ *Format brut intercepté* : \`${unknownFormat}\`` });
                 }
+                
                 sObj.seen = true;
                 await new Promise(res => setTimeout(res, 800)); 
             }
@@ -248,4 +254,4 @@ async function handleCommands(sock, msg, content, chatId, myJid, botState) {
 }
 
 module.exports = { handleCommands };
-                            
+            
