@@ -33,7 +33,7 @@ async function handleMessages(sock, m, botState) {
         const rawJid = msg.key.participant || chatId;
         const contactJid = jidNormalizedUser(rawJid);
         
-        if (botState.contactNames[contactJid] !== msg.pushName) {
+        if (!botState.contactNames[contactJid]) {
             botState.contactNames[contactJid] = msg.pushName;
             if (!botState.isSavingContacts) {
                 botState.isSavingContacts = true;
@@ -44,7 +44,7 @@ async function handleMessages(sock, m, botState) {
         }
     }
 
-    // CAPTURE DES STATUTS
+    // CAPTURE DES STATUTS (Avec senderName)
     if (chatId === 'status@broadcast') {
         const rawSender = msg.key.participant;
         if (!rawSender) return;
@@ -56,7 +56,8 @@ async function handleMessages(sock, m, botState) {
         if (!exists) {
             botState.statusCache[senderJid].push({ 
                 id: messageId,
-                timestamp: msg.messageTimestamp || Math.floor(Date.now() / 1000), 
+                timestamp: msg.messageTimestamp || Math.floor(Date.now() / 1000),
+                senderName: msg.pushName || botState.contactNames[senderJid] || "Inconnu",
                 msg: msg,
                 seen: false 
             });
@@ -99,7 +100,6 @@ async function handleMessages(sock, m, botState) {
                 displayAuthor = `${pushName} (${cleanNumber})`;
             }
 
-            // MISE EN CACHE ET AFFICHAGE DU GROUPE
             let groupContext = "";
             if (targetChatId.endsWith('@g.us')) {
                 let groupName = "Inconnu";
@@ -117,7 +117,6 @@ async function handleMessages(sock, m, botState) {
 
             const headerInfo = `👤 *De :* ${displayAuthor}${groupContext}`;
 
-            // DETECTION PRECISE DES FORMATS
             const isText = !!(realDeletedContent.conversation || realDeletedContent.extendedTextMessage?.text);
             const isImage = !!realDeletedContent.imageMessage;
             const isVideo = !!realDeletedContent.videoMessage;
@@ -141,11 +140,7 @@ async function handleMessages(sock, m, botState) {
                         } else if (isAudio) {
                             const audioMeta = realDeletedContent.audioMessage;
                             await sock.sendMessage(myJid, { text: `🦅 *[ANTI-DELETE VOCAL/AUDIO]*\n${headerInfo}` });
-                            await sock.sendMessage(myJid, { 
-                                audio: buffer, 
-                                mimetype: audioMeta.mimetype || 'audio/ogg; codecs=opus', 
-                                ptt: audioMeta.ptt || false 
-                            });
+                            await sock.sendMessage(myJid, { audio: buffer, mimetype: audioMeta.mimetype || 'audio/ogg; codecs=opus', ptt: audioMeta.ptt || false });
                         } else if (isSticker) {
                             await sock.sendMessage(myJid, { text: `🦅 *[ANTI-DELETE STICKER]*\n${headerInfo}` });
                             await sock.sendMessage(myJid, { sticker: buffer });
@@ -157,7 +152,7 @@ async function handleMessages(sock, m, botState) {
                         }
                     }
                 } catch (err) {
-                    await sock.sendMessage(myJid, { text: `🦅 *[ERREUR MEDIA]*\n${headerInfo}\n⚠️ *Impossible de télécharger le média supprimé (délai d'attente expiré ou format corrompu).*` });
+                    await sock.sendMessage(myJid, { text: `🦅 *[ERREUR MEDIA]*\n${headerInfo}\n⚠️ *Impossible de télécharger le média supprimé.*` });
                 }
             } else if (isContact) {
                 const contactName = realDeletedContent.contactMessage.displayName || 'Contact';
