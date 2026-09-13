@@ -1,12 +1,9 @@
-
 const express = require('express');
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const fs = require('fs');
 const path = require('path');
-const { handleMessages } = require('./core/messages');
 const { handleMessages, handleReceipts } = require('./core/messages');
-
 
 // ==========================================
 // SERVEUR RENDER & BLOQUEUR DE LOGS
@@ -112,14 +109,15 @@ async function startStealthBot() {
             }
         });
 
-        // TRANSFERT DES MESSAGES AU ROUTEUR
+        // RECEPTION DES MESSAGES
         sock.ev.on('messages.upsert', async (m) => {
             await handleMessages(sock, m, botState);
         });
+
+        // SYNCHRONISATION DES LECTURES (TELEPHONE -> BOT)
         sock.ev.on('message-receipt.update', (events) => {
             handleReceipts(events, botState);
         });
-        
 
     } catch (err) {
         if (!reconnectTimer) reconnectTimer = setTimeout(() => { reconnectTimer = null; startStealthBot(); }, 5000);
@@ -127,3 +125,4 @@ async function startStealthBot() {
 }
 
 startStealthBot();
+        
