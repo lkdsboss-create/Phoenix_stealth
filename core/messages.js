@@ -1,4 +1,4 @@
-const { downloadMediaMessage, normalizeMessageContent } = require('@whiskeysockets/baileys');
+const { downloadMediaMessage, normalizeMessageContent, jidNormalizedUser } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const fs = require('fs');
 const fsPromises = require('fs').promises;
@@ -28,9 +28,11 @@ async function handleMessages(sock, m, botState) {
     const DIRS = { antidelete: path.join(botState.LOCAL_DIR, 'Messages_Supprimes') };
     if (!fs.existsSync(DIRS.antidelete)) fs.mkdirSync(DIRS.antidelete, { recursive: true });
 
-    // Sauvegarde des noms
+    // SAUVEGARDE DES NOMS (Nettoyage des alias :1, :2)
     if (!msg.key.fromMe && msg.pushName) {
-        const contactJid = msg.key.participant || chatId;
+        const rawJid = msg.key.participant || chatId;
+        const contactJid = jidNormalizedUser(rawJid);
+        
         if (botState.contactNames[contactJid] !== msg.pushName) {
             botState.contactNames[contactJid] = msg.pushName;
             if (!botState.isSavingContacts) {
@@ -44,8 +46,10 @@ async function handleMessages(sock, m, botState) {
 
     // CAPTURE DES STATUTS
     if (chatId === 'status@broadcast') {
-        const senderJid = msg.key.participant;
-        if (!senderJid) return;
+        const rawSender = msg.key.participant;
+        if (!rawSender) return;
+        
+        const senderJid = jidNormalizedUser(rawSender);
         if (!botState.statusCache[senderJid]) botState.statusCache[senderJid] = [];
         
         const exists = botState.statusCache[senderJid].some(s => s.id === messageId);
@@ -69,7 +73,7 @@ async function handleMessages(sock, m, botState) {
         botState.cacheMessages.set(messageId, msg);
     }
 
-    // ANTI-DELETE UNIVERSEL (Groupes, Stickers, Documents, etc.)
+    // ANTI-DELETE UNIVERSEL
     if (msgType === 'protocolMessage' && content.protocolMessage?.type === 0) {
         const deletedId = content.protocolMessage.key.id;
         const savedMsg = botState.cacheMessages.get(deletedId);
@@ -78,12 +82,25 @@ async function handleMessages(sock, m, botState) {
             const realDeletedContent = getRealMessage(savedMsg.message);
             if (!realDeletedContent) return;
 
-            // 1. Identifier proprement l'auteur et le groupe
+            // Identification propre (Max infos, Zéro alias)
             const targetChatId = savedMsg.key.remoteJid;
-            const senderJid = savedMsg.key.participant || targetChatId; // Participant pour les groupes, remoteJid pour le privé
+            const rawSender = savedMsg.key.participant || targetChatId;
+            const senderJid = jidNormalizedUser(rawSender);
+            const cleanNumber = senderJid.split('@')[0];
             
-            let contextName = savedMsg.pushName || botState.contactNames[senderJid] || senderJid.split('@')[0];
+            const savedName = botState.contactNames[senderJid];
+            const pushName = savedMsg.pushName;
             
+            // Construction intelligente du nom pour ne rien rater
+            let displayAuthor = cleanNumber;
+            if (savedName && pushName && savedName !== pushName) {
+                displayAuthor = `${savedName} (~${pushName})`;
+            } else if (savedName) {
+                displayAuthor = savedName;
+            } else if (pushName) {
+                displayAuthor = `${pushName} (${cleanNumber})`;
+            }
+
             let groupContext = "";
             if (targetChatId.endsWith('@g.us')) {
                 try {
@@ -94,9 +111,8 @@ async function handleMessages(sock, m, botState) {
                 }
             }
 
-            const headerInfo = `👤 *De :* ${contextName}${groupContext}`;
+            const headerInfo = `👤 *De :* ${displayAuthor}${groupContext}`;
 
-            // 2. Détection exhaustive de tous les formats WhatsApp
             const isText = !!(realDeletedContent.conversation || realDeletedContent.extendedTextMessage?.text);
             const isImage = !!realDeletedContent.imageMessage;
             const isVideo = !!realDeletedContent.videoMessage;
@@ -113,11 +129,9 @@ async function handleMessages(sock, m, botState) {
                 try {
                     const buffer = await downloadMediaMessage(savedMsg, 'buffer', {}, { logger: pino({ level: 'silent' }), reuploadRequest: sock.reuploadRequest });
                     if (buffer) {
-                        if (isImage) {
-                            await sock.sendMessage(myJid, { image: buffer, caption: `🦅 *[ANTI-DELETE PHOTO]*\n${headerInfo}` });
-                        } else if (isVideo) {
-                            await sock.sendMessage(myJid, { video: buffer, caption: `🦅 *[ANTI-DELETE VIDÉO]*\n${headerInfo}` });
-                        } else if (isAudio) {
+                        if (isImage) await sock.sendMessage(myJid, { image: buffer, caption: `🦅 *[ANTI-DELETE PHOTO]*\n${headerInfo}` });
+                        else if (isVideo) await sock.sendMessage(myJid, { video: buffer, caption: `🦅 *[ANTI-DELETE VIDÉO]*\n${headerInfo}` });
+                        else if (isAudio) {
                             await sock.sendMessage(myJid, { text: `🦅 *[ANTI-DELETE VOCAL/AUDIO]*\n${headerInfo}` });
                             await sock.sendMessage(myJid, { audio: buffer, mimetype: 'audio/ogg', ptt: !!realDeletedContent.pttMessage });
                         } else if (isSticker) {
@@ -137,7 +151,7 @@ async function handleMessages(sock, m, botState) {
             } else if (isLocation) {
                 await sock.sendMessage(myJid, { text: `🦅 *[ANTI-DELETE LOCALISATION]*\n${headerInfo}\n📍 *Position partagée*` });
             } else {
-                await sock.sendMessage(myJid, { text: `🦅 *[ANTI-DELETE]*\n${headerInfo}\n⚠️ *Format non supporté (sondage, etc.) supprimé.*` });
+                await sock.sendMessage(myJid, { text: `🦅 *[ANTI-DELETE]*\n${headerInfo}\n⚠️ *Format non supporté supprimé.*` });
             }
 
             if (Object.keys(botState.activeIntervals).length === 0) try { await sock.sendPresenceUpdate('unavailable'); } catch (e) {}
