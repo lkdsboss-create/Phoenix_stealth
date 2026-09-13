@@ -59,14 +59,14 @@ async function handleCommands(sock, msg, content, chatId, myJid, botState) {
         await sock.sendMessage(myJid, { text: "🧹 *Cache mémoire vidé !*" });
     }
     else if (text === '!menu' || text === '!help') {
-        const mText = `🦅 *PHOENIX CONTROL HUB v5.4.2* 🦅\n\n` +
+        const mText = `🦅 *PHOENIX CONTROL HUB v5.4.3* 🦅\n\n` +
             `⚡ *COMMANDES DE CONTROLE :*\n` +
             `• \`!statut\` ➜ Consulte la mémoire des statuts non lus.\n` +
             `• \`!statut [nom]\` ➜ Récupère les statuts d'un contact.\n` +
             `• \`!type [n°]\` ➜ Simule "Écrit..." en continu.\n` +
             `• \`!record [n°]\` ➜ Simule "Enregistre un vocal...".\n` +
             `• \`!stop [n°]\` ➜ Arrête toute simulation.\n` +
-            `• \`!tous [texte]\` ➜ Mentionne tout le monde (réponse supportée).\n` +
+            `• \`!tous [texte]\` ➜ Mentionne tout le monde.\n` +
             `• \`!spam [n] [texte]\` ➜ Envoie [n] messages.\n` +
             `• \`!setnom [n°] [nom]\` ➜ Force un nom de contact.\n` +
             `• \`!ping\` ➜ Affiche la latence.\n` +
@@ -129,10 +129,8 @@ async function handleCommands(sock, msg, content, chatId, myJid, botState) {
             
             metadata.participants.forEach((p, i) => { txt += `${i + 1}. @${p.id.split('@')[0]}\n`; });
 
-            // Analyse si tu as répondu (cité) un message
             let options = {};
             const contextInfo = content.extendedTextMessage?.contextInfo;
-            
             if (contextInfo && contextInfo.stanzaId) {
                 options.quoted = {
                     key: {
@@ -144,7 +142,6 @@ async function handleCommands(sock, msg, content, chatId, myJid, botState) {
                     message: contextInfo.quotedMessage
                 };
             }
-
             await sock.sendMessage(chatId, { text: txt, mentions: metadata.participants.map(p => p.id) }, options);
         } catch (e) {}
     }
@@ -161,7 +158,7 @@ async function handleCommands(sock, msg, content, chatId, myJid, botState) {
             unseenAuthors.forEach((jid, i) => {
                 const countUnseen = botState.statusCache[jid].filter(s => !s.seen).length;
                 const cleanNum = jid.split('@')[0];
-                const displayName = botState.contactNames[jid] ? `${botState.contactNames[jid]} (${cleanNum})` : cleanNum;
+                const displayName = botState.contactNames[jid] ? `${botState.contactNames[jid]} (${cleanNum})` : (botState.statusCache[jid][0]?.senderName || cleanNum);
                 
                 msgList += `${i + 1}. ${displayName} ➜ ${countUnseen} statut(s)\n`;
             });
@@ -170,23 +167,27 @@ async function handleCommands(sock, msg, content, chatId, myJid, botState) {
             const queryLower = query.toLowerCase();
             let targetJid = null;
             let targetName = null;
+            let unseenStatuses = [];
 
-            for (const jid of Object.keys(botState.statusCache)) {
-                const name = botState.contactNames[jid] || "";
+            // RECHERCHE CROISÉE ROBUSTE (Ta logique)
+            for (const [jid, statuses] of Object.entries(botState.statusCache)) {
+                const savedName = (botState.contactNames[jid] || "").toLowerCase();
                 const cleanNum = jid.split('@')[0];
-                
-                if (name.toLowerCase().includes(queryLower) || cleanNum.includes(queryLower)) {
+                const statusNames = statuses.map(s => (s.senderName || "").toLowerCase());
+
+                if (
+                    savedName.includes(queryLower) ||
+                    cleanNum.includes(queryLower) ||
+                    statusNames.some(name => name.includes(queryLower))
+                ) {
                     targetJid = jid;
-                    targetName = name ? `${name} (${cleanNum})` : cleanNum;
-                    break;
+                    targetName = botState.contactNames[jid] ? `${botState.contactNames[jid]} (${cleanNum})` : (statuses[0]?.senderName || cleanNum);
+                    unseenStatuses = statuses.filter(s => !s.seen);
+                    break; 
                 }
             }
 
             if (!targetJid) return await sock.sendMessage(myJid, { text: `⚠️ Aucun statut trouvé en mémoire pour : "${query}".` });
-            
-            const allStatuses = botState.statusCache[targetJid] || [];
-            const unseenStatuses = allStatuses.filter(s => !s.seen);
-
             if (unseenStatuses.length === 0) return await sock.sendMessage(myJid, { text: `🕵️‍♂️ Aucun statut non lu pour : ${targetName}` });
             
             await sock.sendMessage(myJid, { text: `🦅 *Envoi des statuts non lus de ${targetName}...*` });
@@ -223,4 +224,3 @@ async function handleCommands(sock, msg, content, chatId, myJid, botState) {
 }
 
 module.exports = { handleCommands };
-                    
