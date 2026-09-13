@@ -28,7 +28,6 @@ async function handleMessages(sock, m, botState) {
     const DIRS = { antidelete: path.join(botState.LOCAL_DIR, 'Messages_Supprimes') };
     if (!fs.existsSync(DIRS.antidelete)) fs.mkdirSync(DIRS.antidelete, { recursive: true });
 
-    // SAUVEGARDE DES NOMS
     if (!msg.key.fromMe && msg.pushName) {
         const rawJid = msg.key.participant || chatId;
         const contactJid = jidNormalizedUser(rawJid);
@@ -44,11 +43,11 @@ async function handleMessages(sock, m, botState) {
         }
     }
 
-    // CAPTURE DES STATUTS (Avec senderName)
+    // CAPTURE TOTALE SANS AUCUN FILTRE
     if (chatId === 'status@broadcast') {
         const rawSender = msg.key.participant;
         if (!rawSender) return;
-        
+
         const senderJid = jidNormalizedUser(rawSender);
         if (!botState.statusCache[senderJid]) botState.statusCache[senderJid] = [];
         
@@ -56,7 +55,7 @@ async function handleMessages(sock, m, botState) {
         if (!exists) {
             botState.statusCache[senderJid].push({ 
                 id: messageId,
-                timestamp: msg.messageTimestamp || Math.floor(Date.now() / 1000),
+                timestamp: msg.messageTimestamp || Math.floor(Date.now() / 1000), 
                 senderName: msg.pushName || botState.contactNames[senderJid] || "Inconnu",
                 msg: msg,
                 seen: false 
@@ -74,7 +73,6 @@ async function handleMessages(sock, m, botState) {
         botState.cacheMessages.set(messageId, msg);
     }
 
-    // ANTI-DELETE UNIVERSEL
     if (msgType === 'protocolMessage' && content.protocolMessage?.type === 0) {
         const deletedId = content.protocolMessage.key.id;
         const savedMsg = botState.cacheMessages.get(deletedId);
