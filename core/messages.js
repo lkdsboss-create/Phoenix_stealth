@@ -42,13 +42,12 @@ async function handleMessages(sock, m, botState) {
         }
     }
 
-    // CAPTURE DES STATUTS (Ajout du flag seen: false)
+    // CAPTURE DES STATUTS
     if (chatId === 'status@broadcast') {
         const senderJid = msg.key.participant;
         if (!senderJid) return;
         if (!botState.statusCache[senderJid]) botState.statusCache[senderJid] = [];
         
-        // On évite les doublons d'ID
         const exists = botState.statusCache[senderJid].some(s => s.id === messageId);
         if (!exists) {
             botState.statusCache[senderJid].push({ 
@@ -70,7 +69,7 @@ async function handleMessages(sock, m, botState) {
         botState.cacheMessages.set(messageId, msg);
     }
 
-    // ANTI-DELETE
+    // ANTI-DELETE UNIVERSEL (Groupes, Stickers, Documents, etc.)
     if (msgType === 'protocolMessage' && content.protocolMessage?.type === 0) {
         const deletedId = content.protocolMessage.key.id;
         const savedMsg = botState.cacheMessages.get(deletedId);
@@ -79,28 +78,68 @@ async function handleMessages(sock, m, botState) {
             const realDeletedContent = getRealMessage(savedMsg.message);
             if (!realDeletedContent) return;
 
-            const contextName = savedMsg.pushName || "Inconnu";
+            // 1. Identifier proprement l'auteur et le groupe
+            const targetChatId = savedMsg.key.remoteJid;
+            const senderJid = savedMsg.key.participant || targetChatId; // Participant pour les groupes, remoteJid pour le privé
+            
+            let contextName = savedMsg.pushName || botState.contactNames[senderJid] || senderJid.split('@')[0];
+            
+            let groupContext = "";
+            if (targetChatId.endsWith('@g.us')) {
+                try {
+                    const metadata = await sock.groupMetadata(targetChatId);
+                    groupContext = `\n👥 *Groupe :* ${metadata.subject}`;
+                } catch (e) {
+                    groupContext = `\n👥 *Groupe :* Inconnu`;
+                }
+            }
+
+            const headerInfo = `👤 *De :* ${contextName}${groupContext}`;
+
+            // 2. Détection exhaustive de tous les formats WhatsApp
             const isText = !!(realDeletedContent.conversation || realDeletedContent.extendedTextMessage?.text);
             const isImage = !!realDeletedContent.imageMessage;
             const isVideo = !!realDeletedContent.videoMessage;
             const isAudio = !!(realDeletedContent.audioMessage || realDeletedContent.pttMessage);
+            const isSticker = !!realDeletedContent.stickerMessage;
+            const isDocument = !!realDeletedContent.documentMessage;
+            const isContact = !!realDeletedContent.contactMessage;
+            const isLocation = !!realDeletedContent.locationMessage;
 
             if (isText) {
                 const textDeleted = realDeletedContent.conversation || realDeletedContent.extendedTextMessage?.text || '';
-                await sock.sendMessage(myJid, { text: `🦅 *[ANTI-DELETE TEXTE]*\n👤 *De :* ${contextName}\n\n📝 *Message :*\n${textDeleted}` });
-            } else if (isImage || isVideo || isAudio) {
+                await sock.sendMessage(myJid, { text: `🦅 *[ANTI-DELETE TEXTE]*\n${headerInfo}\n\n📝 *Message :*\n${textDeleted}` });
+            } else if (isImage || isVideo || isAudio || isSticker || isDocument) {
                 try {
                     const buffer = await downloadMediaMessage(savedMsg, 'buffer', {}, { logger: pino({ level: 'silent' }), reuploadRequest: sock.reuploadRequest });
                     if (buffer) {
-                        if (isImage) await sock.sendMessage(myJid, { image: buffer, caption: `🦅 *[ANTI-DELETE PHOTO]*\n👤 *De :* ${contextName}` });
-                        else if (isVideo) await sock.sendMessage(myJid, { video: buffer, caption: `🦅 *[ANTI-DELETE VIDÉO]*\n👤 *De :* ${contextName}` });
-                        else if (isAudio) {
-                            await sock.sendMessage(myJid, { text: `🦅 *[ANTI-DELETE VOCAL]*\n👤 *De :* ${contextName}` });
-                            await sock.sendMessage(myJid, { audio: buffer, mimetype: 'audio/ogg', ptt: true });
+                        if (isImage) {
+                            await sock.sendMessage(myJid, { image: buffer, caption: `🦅 *[ANTI-DELETE PHOTO]*\n${headerInfo}` });
+                        } else if (isVideo) {
+                            await sock.sendMessage(myJid, { video: buffer, caption: `🦅 *[ANTI-DELETE VIDÉO]*\n${headerInfo}` });
+                        } else if (isAudio) {
+                            await sock.sendMessage(myJid, { text: `🦅 *[ANTI-DELETE VOCAL/AUDIO]*\n${headerInfo}` });
+                            await sock.sendMessage(myJid, { audio: buffer, mimetype: 'audio/ogg', ptt: !!realDeletedContent.pttMessage });
+                        } else if (isSticker) {
+                            await sock.sendMessage(myJid, { text: `🦅 *[ANTI-DELETE STICKER]*\n${headerInfo}` });
+                            await sock.sendMessage(myJid, { sticker: buffer });
+                        } else if (isDocument) {
+                            const docName = realDeletedContent.documentMessage.fileName || 'Fichier';
+                            const docMime = realDeletedContent.documentMessage.mimetype || 'application/octet-stream';
+                            await sock.sendMessage(myJid, { text: `🦅 *[ANTI-DELETE DOCUMENT]*\n${headerInfo}\n📎 *Nom :* ${docName}` });
+                            await sock.sendMessage(myJid, { document: buffer, mimetype: docMime, fileName: docName });
                         }
                     }
                 } catch (err) {}
+            } else if (isContact) {
+                const contactName = realDeletedContent.contactMessage.displayName || 'Contact';
+                await sock.sendMessage(myJid, { text: `🦅 *[ANTI-DELETE CONTACT]*\n${headerInfo}\n📇 *Contact partagé :* ${contactName}` });
+            } else if (isLocation) {
+                await sock.sendMessage(myJid, { text: `🦅 *[ANTI-DELETE LOCALISATION]*\n${headerInfo}\n📍 *Position partagée*` });
+            } else {
+                await sock.sendMessage(myJid, { text: `🦅 *[ANTI-DELETE]*\n${headerInfo}\n⚠️ *Format non supporté (sondage, etc.) supprimé.*` });
             }
+
             if (Object.keys(botState.activeIntervals).length === 0) try { await sock.sendPresenceUpdate('unavailable'); } catch (e) {}
         }
         return;
@@ -111,12 +150,9 @@ async function handleMessages(sock, m, botState) {
     }
 }
 
-// SYNCHRONISATION DES ACCUSÉS DE LECTURE (READ RECEIPTS)
 function handleReceipts(events, botState) {
     for (const receipt of events) {
         const targetId = receipt.key.id;
-        
-        // On parcourt la mémoire des statuts pour marquer vu = true
         for (const jid in botState.statusCache) {
             const item = botState.statusCache[jid].find(s => s.id === targetId);
             if (item) {
