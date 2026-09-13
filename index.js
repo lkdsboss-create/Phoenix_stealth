@@ -1,5 +1,5 @@
 const express = require('express');
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, jidNormalizedUser } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const fs = require('fs');
 const path = require('path');
@@ -26,13 +26,34 @@ const NAMES_FILE = path.join(LOCAL_DIR, 'contacts_names.json');
 
 if (!fs.existsSync(LOCAL_DIR)) fs.mkdirSync(LOCAL_DIR, { recursive: true });
 
+// 🛡️ VACCIN ANTI-ALIAS : Nettoyage automatique des anciens contacts corrompus
+let cleanContacts = {};
+if (fs.existsSync(NAMES_FILE)) {
+    try {
+        const rawContacts = JSON.parse(fs.readFileSync(NAMES_FILE, 'utf-8'));
+        let hasAliases = false;
+        
+        for (const [key, name] of Object.entries(rawContacts)) {
+            const cleanKey = jidNormalizedUser(key);
+            cleanContacts[cleanKey] = name;
+            if (cleanKey !== key) hasAliases = true;
+        }
+        
+        // S'il a trouvé et réparé des alias, il réécrit le fichier proprement
+        if (hasAliases) {
+            fs.writeFileSync(NAMES_FILE, JSON.stringify(cleanContacts, null, 2));
+            console.log("🧹 Base de données des contacts nettoyée des alias.");
+        }
+    } catch (e) {}
+}
+
 const botState = {
     PHONE_NUMBER: "22896081989",
     START_TIME: Date.now(),
     LOCAL_DIR: LOCAL_DIR,
     NAMES_FILE: NAMES_FILE,
     cacheMessages: new Map(),
-    contactNames: fs.existsSync(NAMES_FILE) ? JSON.parse(fs.readFileSync(NAMES_FILE, 'utf-8')) : {},
+    contactNames: cleanContacts, // On charge la base de données 100% propre
     activeIntervals: {},
     statusCache: {},
     isSavingContacts: false,
@@ -93,7 +114,7 @@ async function startStealthBot() {
                 }
             } else if (connection === 'open') {
                 console.log('\n==================================================');
-                console.log('🦅 PHOENIX ONLINE — STEALTH v5.4.0 (Modulaire)');
+                console.log('🦅 PHOENIX ONLINE — STEALTH v5.4.1 (Modulaire)');
                 console.log('==================================================\n');
                 try { await sock.sendPresenceUpdate('unavailable'); } catch (e) {}
             }
@@ -125,4 +146,3 @@ async function startStealthBot() {
 }
 
 startStealthBot();
-        
