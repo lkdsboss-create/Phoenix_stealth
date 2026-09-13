@@ -1,7 +1,6 @@
 const { downloadMediaMessage, normalizeMessageContent } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 
-// Fonction intégrée directement ici pour casser la dépendance circulaire
 function getRealMessage(message) {
     if (!message) return null;
     let normalized = normalizeMessageContent(message);
@@ -29,7 +28,7 @@ async function handleCommands(sock, msg, content, chatId, myJid, botState) {
     if (commandsList.some(cmd => text === cmd || text.startsWith(cmd + ' '))) {
         try { await sock.sendMessage(chatId, { delete: msg.key }); } catch (err) {}
     } else {
-        return; // Ce n'est pas une commande
+        return; 
     }
 
     const resolveTargetInfo = async (cmdString) => {
@@ -57,6 +56,23 @@ async function handleCommands(sock, msg, content, chatId, myJid, botState) {
         botState.cacheMessages.clear();
         await sock.sendMessage(myJid, { text: "🧹 *Cache mémoire vidé !*" });
     }
+    else if (text === '!menu' || text === '!help') {
+        const mText = `🦅 *PHOENIX CONTROL HUB v5.4.0* 🦅\n\n` +
+            `⚡ *COMMANDES DE CONTROLE :*\n` +
+            `• \`!statut\` ➜ Consulte la mémoire des statuts non lus.\n` +
+            `• \`!statut [nom]\` ➜ Récupère les statuts d'un contact.\n` +
+            `• \`!type [n°]\` ➜ Simule "Écrit..." en continu.\n` +
+            `• \`!record [n°]\` ➜ Simule "Enregistre un vocal...".\n` +
+            `• \`!stop [n°]\` ➜ Arrête toute simulation.\n` +
+            `• \`!tous\` ➜ Mentionne tout le monde.\n` +
+            `• \`!spam [n] [texte]\` ➜ Envoie [n] messages.\n` +
+            `• \`!setnom [n°] [nom]\` ➜ Force un nom de contact.\n` +
+            `• \`!ping\` ➜ Affiche la latence.\n` +
+            `• \`!runtime\` ➜ Temps d'activité.\n` +
+            `• \`!clean\` ➜ Libère la RAM.\n\n` +
+            `📁 *Stockage :*\n\`${botState.LOCAL_DIR}\``;
+        await sock.sendMessage(myJid, { text: mText });
+    }
     else if (text.startsWith('!setnom ')) {
         const args = rawText.trim().split(' ');
         if (args.length >= 3) {
@@ -69,12 +85,10 @@ async function handleCommands(sock, msg, content, chatId, myJid, botState) {
     else if (text.startsWith('!type')) {
         const { targetJid, targetDisplay } = await resolveTargetInfo('!type');
         if (botState.activeIntervals[targetJid]) clearInterval(botState.activeIntervals[targetJid]);
-        
         try { 
             await sock.sendPresenceUpdate('available', targetJid);
             await sock.sendPresenceUpdate('composing', targetJid); 
         } catch(e){}
-        
         botState.activeIntervals[targetJid] = setInterval(async () => {
             if (botState.currentSock !== sock) { clearInterval(botState.activeIntervals[targetJid]); delete botState.activeIntervals[targetJid]; return; }
             try { await sock.sendPresenceUpdate('composing', targetJid); } 
@@ -85,12 +99,10 @@ async function handleCommands(sock, msg, content, chatId, myJid, botState) {
     else if (text.startsWith('!record')) {
         const { targetJid, targetDisplay } = await resolveTargetInfo('!record');
         if (botState.activeIntervals[targetJid]) clearInterval(botState.activeIntervals[targetJid]);
-        
         try { 
             await sock.sendPresenceUpdate('available', targetJid);
             await sock.sendPresenceUpdate('recording', targetJid); 
         } catch(e){}
-        
         botState.activeIntervals[targetJid] = setInterval(async () => {
             if (botState.currentSock !== sock) { clearInterval(botState.activeIntervals[targetJid]); delete botState.activeIntervals[targetJid]; return; }
             try { await sock.sendPresenceUpdate('recording', targetJid); } 
@@ -114,33 +126,25 @@ async function handleCommands(sock, msg, content, chatId, myJid, botState) {
     }
     else if (text.startsWith('!statut')) {
         const query = text.replace('!statut', '').trim();
-
-        // 1. Filtrer uniquement les statuts NON VUS pour chaque contact
         const unseenAuthors = Object.keys(botState.statusCache).filter(jid => {
             return botState.statusCache[jid].some(s => !s.seen);
         });
 
         if (!query) {
             if (unseenAuthors.length === 0) return await sock.sendMessage(myJid, { text: "📭 Aucun statut non lu en mémoire." });
-            
             let msgList = `🦅 *STATUTS NON LUS (${unseenAuthors.length} contacts)* :\n\n`;
             unseenAuthors.forEach((jid, i) => {
                 const countUnseen = botState.statusCache[jid].filter(s => !s.seen).length;
-                msgList += `${i + 1}. ${botState.contactNames[jid] || "Inconnu"} ➜ ${countUnseen} nouveau(x) statut(s)\n`;
+                msgList += `${i + 1}. ${botState.contactNames[jid] || "Inconnu"} ➜ ${countUnseen} statut(s)\n`;
             });
             await sock.sendMessage(myJid, { text: msgList });
         } else {
-            const matches = Object.entries(botState.contactNames).filter(([jid, name]) => 
-                name.toLowerCase().includes(query.toLowerCase()) || jid.includes(query)
-            ).map(([jid, name]) => ({ jid, name }));
-
+            const matches = Object.entries(botState.contactNames).filter(([jid, name]) => name.toLowerCase().includes(query.toLowerCase()) || jid.includes(query)).map(([jid, name]) => ({ jid, name }));
             if (matches.length === 0) return await sock.sendMessage(myJid, { text: `⚠️ Contact introuvable.` });
             
             const targetJid = matches[0].jid;
             const targetName = matches[0].name;
             const allStatuses = botState.statusCache[targetJid] || [];
-            
-            // Récupérer uniquement les statuts non lues
             const unseenStatuses = allStatuses.filter(s => !s.seen);
 
             if (unseenStatuses.length === 0) return await sock.sendMessage(myJid, { text: `🕵️‍♂️ Aucun statut non lu pour : ${targetName}` });
@@ -161,12 +165,15 @@ async function handleCommands(sock, msg, content, chatId, myJid, botState) {
                         else if (isVideo) await sock.sendMessage(myJid, { video: buffer });
                     } catch (e) {}
                 }
-                
-                // Marquer comme vu une fois envoyé par le bot
                 sObj.seen = true;
                 await new Promise(res => setTimeout(res, 800)); 
             }
         }
     }
     
+    if (Object.keys(botState.activeIntervals).length === 0) {
+        try { await sock.sendPresenceUpdate('unavailable'); } catch(e){}
+    }
+}
+
 module.exports = { handleCommands };
