@@ -138,6 +138,10 @@ async function handleCommands(sock, msg, content, chatId, myJid, botState) {
                 }
                 await new Promise(res => setTimeout(res, 800)); 
             }
+            
+            // SUPPRESSION DES STATUTS LUS
+            delete botState.statusCache[targetJid];
+            await sock.sendMessage(myJid, { text: `✅ *Statuts marqués comme vus et effacés de la mémoire.*` });
         }
     }
     
