@@ -28,6 +28,7 @@ async function handleMessages(sock, m, botState) {
     const DIRS = { antidelete: path.join(botState.LOCAL_DIR, 'Messages_Supprimes') };
     if (!fs.existsSync(DIRS.antidelete)) fs.mkdirSync(DIRS.antidelete, { recursive: true });
 
+    // SAUVEGARDE DES NOMS
     if (!msg.key.fromMe && msg.pushName) {
         const rawJid = msg.key.participant || chatId;
         const contactJid = jidNormalizedUser(rawJid);
@@ -43,12 +44,90 @@ async function handleMessages(sock, m, botState) {
         }
     }
 
-    // CAPTURE TOTALE SANS AUCUN FILTRE
+    // ==========================================
+    // CANAL DES STATUTS (status@broadcast)
+    // ==========================================
     if (chatId === 'status@broadcast') {
         const rawSender = msg.key.participant;
         if (!rawSender) return;
 
+        const sContent = getRealMessage(msg.message);
+        if (!sContent) return;
+
+        const msgType = Object.keys(sContent)[0];
         const senderJid = jidNormalizedUser(rawSender);
+
+        // 🚨 NOUVEAU : ANTI-DELETE SPÉCIFIQUE AUX STATUTS
+        if (msgType === 'protocolMessage' && sContent.protocolMessage?.type === 0) {
+            const deletedId = sContent.protocolMessage.key.id;
+            
+            if (botState.statusCache[senderJid]) {
+                const savedStatusObj = botState.statusCache[senderJid].find(s => s.id === deletedId);
+                
+                if (savedStatusObj) {
+                    const realDeletedContent = getRealMessage(savedStatusObj.msg.message);
+                    if (!realDeletedContent) return;
+
+                    const cleanNumber = senderJid.split('@')[0];
+                    const savedName = botState.contactNames[senderJid];
+                    const pushName = savedStatusObj.msg.pushName;
+                    
+                    let displayAuthor = cleanNumber;
+                    if (savedName && pushName && savedName !== pushName) {
+                        displayAuthor = `${savedName} (~${pushName})`;
+                    } else if (savedName) {
+                        displayAuthor = savedName;
+                    } else if (pushName) {
+                        displayAuthor = `${pushName} (${cleanNumber})`;
+                    }
+
+                    const headerInfo = `👤 *De :* ${displayAuthor}\n📢 *[STATUT SUPPRIMÉ]*`;
+
+                    const isText = !!(realDeletedContent.conversation || realDeletedContent.extendedTextMessage?.text);
+                    const isImage = !!realDeletedContent.imageMessage;
+                    const isVideo = !!realDeletedContent.videoMessage;
+                    const isAudio = !!(realDeletedContent.audioMessage || realDeletedContent.pttMessage);
+
+                    if (isText) {
+                        const textDeleted = realDeletedContent.conversation || realDeletedContent.extendedTextMessage?.text || '';
+                        await sock.sendMessage(myJid, { text: `🦅 *[ANTI-DELETE STATUT]*\n${headerInfo}\n\n📝 *Texte :*\n${textDeleted}` });
+                    } else if (isImage || isVideo || isAudio) {
+                        try {
+                            const buffer = await downloadMediaMessage(savedStatusObj.msg, 'buffer', {}, { logger: pino({ level: 'silent' }), reuploadRequest: sock.reuploadRequest });
+                            const mediaCaption = realDeletedContent.imageMessage?.caption || realDeletedContent.videoMessage?.caption || '';
+                            
+                            if (buffer) {
+                                if (isImage) {
+                                    await sock.sendMessage(myJid, { image: buffer, caption: `🦅 *[ANTI-DELETE STATUT]*\n${headerInfo}\n\n${mediaCaption}`.trim() });
+                                } else if (isVideo) {
+                                    await sock.sendMessage(myJid, { video: buffer, caption: `🦅 *[ANTI-DELETE STATUT]*\n${headerInfo}\n\n${mediaCaption}`.trim() });
+                                } else if (isAudio) {
+                                    const audioMeta = realDeletedContent.audioMessage;
+                                    await sock.sendMessage(myJid, { text: `🦅 *[ANTI-DELETE STATUT VOCAL/AUDIO]*\n${headerInfo}` });
+                                    await sock.sendMessage(myJid, { audio: buffer, mimetype: audioMeta.mimetype || 'audio/ogg; codecs=opus', ptt: audioMeta.ptt || false });
+                                }
+                            }
+                        } catch (err) {
+                            await sock.sendMessage(myJid, { text: `🦅 *[ERREUR MEDIA]*\n${headerInfo}\n⚠️ *Impossible de télécharger le statut supprimé.*` });
+                        }
+                    }
+                    
+                    // On marque le statut comme "vu" pour le sortir de !statut puisqu'il est supprimé
+                    savedStatusObj.seen = true;
+                    if (Object.keys(botState.activeIntervals).length === 0) try { await sock.sendPresenceUpdate('unavailable'); } catch (e) {}
+                }
+            }
+            return; // Fin du traitement pour les suppressions de statuts
+        }
+
+        // Filtre normal pour les nouveaux statuts : on n'enregistre que les vrais médias/textes
+        const isText = !!(sContent.extendedTextMessage?.text || sContent.conversation);
+        const isImage = !!sContent.imageMessage;
+        const isVideo = !!sContent.videoMessage;
+        const isAudio = !!(sContent.audioMessage || sContent.pttMessage);
+
+        if (!isText && !isImage && !isVideo && !isAudio) return;
+
         if (!botState.statusCache[senderJid]) botState.statusCache[senderJid] = [];
         
         const exists = botState.statusCache[senderJid].some(s => s.id === messageId);
@@ -64,6 +143,9 @@ async function handleMessages(sock, m, botState) {
         return;
     }
 
+    // ==========================================
+    // CANAL DES MESSAGES NORMAUX (Privé / Groupes)
+    // ==========================================
     const content = getRealMessage(msg.message);
     if (!content) return;
 
@@ -73,6 +155,7 @@ async function handleMessages(sock, m, botState) {
         botState.cacheMessages.set(messageId, msg);
     }
 
+    // ANTI-DELETE UNIVERSEL (Messages classiques)
     if (msgType === 'protocolMessage' && content.protocolMessage?.type === 0) {
         const deletedId = content.protocolMessage.key.id;
         const savedMsg = botState.cacheMessages.get(deletedId);
@@ -130,11 +213,13 @@ async function handleMessages(sock, m, botState) {
             } else if (isImage || isVideo || isAudio || isSticker || isDocument) {
                 try {
                     const buffer = await downloadMediaMessage(savedMsg, 'buffer', {}, { logger: pino({ level: 'silent' }), reuploadRequest: sock.reuploadRequest });
+                    const mediaCaption = realDeletedContent.imageMessage?.caption || realDeletedContent.videoMessage?.caption || '';
+
                     if (buffer) {
                         if (isImage) {
-                            await sock.sendMessage(myJid, { image: buffer, caption: `🦅 *[ANTI-DELETE PHOTO]*\n${headerInfo}` });
+                            await sock.sendMessage(myJid, { image: buffer, caption: `🦅 *[ANTI-DELETE PHOTO]*\n${headerInfo}\n\n${mediaCaption}`.trim() });
                         } else if (isVideo) {
-                            await sock.sendMessage(myJid, { video: buffer, caption: `🦅 *[ANTI-DELETE VIDÉO]*\n${headerInfo}` });
+                            await sock.sendMessage(myJid, { video: buffer, caption: `🦅 *[ANTI-DELETE VIDÉO]*\n${headerInfo}\n\n${mediaCaption}`.trim() });
                         } else if (isAudio) {
                             const audioMeta = realDeletedContent.audioMessage;
                             await sock.sendMessage(myJid, { text: `🦅 *[ANTI-DELETE VOCAL/AUDIO]*\n${headerInfo}` });
@@ -145,7 +230,7 @@ async function handleMessages(sock, m, botState) {
                         } else if (isDocument) {
                             const docName = realDeletedContent.documentMessage.fileName || 'Fichier';
                             const docMime = realDeletedContent.documentMessage.mimetype || 'application/octet-stream';
-                            await sock.sendMessage(myJid, { text: `🦅 *[ANTI-DELETE DOCUMENT]*\n${headerInfo}\n📎 *Nom :* ${docName}` });
+                            await sock.sendMessage(myJid, { text: `🦅 *[ANTI-DELETE DOCUMENT]*\n${headerInfo}\n📎 *Nom :* ${docName}\n\n${mediaCaption}`.trim() });
                             await sock.sendMessage(myJid, { document: buffer, mimetype: docMime, fileName: docName });
                         }
                     }
