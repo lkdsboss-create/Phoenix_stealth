@@ -270,3 +270,4 @@ function handleReceipts(events, botState) {
 }
 
 module.exports = { handleMessages, handleReceipts, getRealMessage };
+            
