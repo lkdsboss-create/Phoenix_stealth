@@ -126,13 +126,12 @@ async function startStealthBot() {
 
                 if (statusCode === 440) {
                     console.log('⚠️ CONFLIT 440: Session ouverte ailleurs.');
-                    console.log('⏳ Attente 15s avant reconnexion pour éviter boucle...');
                     if (!reconnectTimer) reconnectTimer = setTimeout(() => { reconnectTimer = null; startStealthBot(); }, 15000);
                 } else if (shouldReconnect) {
                     console.log('🔄 Reconnexion en cours dans 3 secondes...');
                     if (!reconnectTimer) reconnectTimer = setTimeout(() => { reconnectTimer = null; startStealthBot(); }, 3000);
                 } else {
-                    console.log('❌ Session déconnectée. Nouveau code requis. Supprime auth_info et redémarre.');
+                    console.log('❌ Session déconnectée. Nouveau code requis.');
                 }
             } else if (connection === 'open') {
                 console.log('\n==================================================');
@@ -141,12 +140,14 @@ async function startStealthBot() {
                 try { await sock.sendPresenceUpdate('unavailable'); } catch (e) {}
             }
 
-            // Génération du code de pairage sécurisée et temporisée
-            if (qr === undefined && !sock.authState.creds.registered && !pairingRequested) {
+            // CORRECTION : On demande le code uniquement si la socket est en phase de connexion/enregistrement
+            // et que le client n'est pas déjà enregistré.
+            if (!sock.authState.creds.registered && !pairingRequested) {
                 pairingRequested = true;
+                // On s'assure d'attendre un court instant que la liaison WS soit stable
                 pairingTimer = setTimeout(async () => {
                     try {
-                        console.log(`📱 Demande de code pour ${botState.PHONE_NUMBER}...`);
+                        console.log(`📱 Demande de code de pairage pour ${botState.PHONE_NUMBER}...`);
                         let code = await sock.requestPairingCode(botState.PHONE_NUMBER);
                         console.log(`\n======================================================`);
                         console.log(`🎯 TON CODE DE JUMELAGE : ${code?.match(/.{1,4}/g)?.join('-')}`);
@@ -155,9 +156,10 @@ async function startStealthBot() {
                         console.error('Erreur pairing:', err.message);
                         pairingRequested = false; 
                     }
-                }, 3000);
+                }, 5000); // Délai allongé à 5 secondes pour éviter le "Connection Closed"
             }
         });
+
 
         // Routage des événements vers les fichiers modulaires
         sock.ev.on('messages.upsert', async (m) => {
