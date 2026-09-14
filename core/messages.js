@@ -1,80 +1,49 @@
-const { downloadMediaMessage, normalizeMessageContent, jidNormalizedUser } = require('@whiskeysockets/baileys');
+const { downloadMediaMessage, jidNormalizedUser } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const fs = require('fs');
 const fsPromises = require('fs').promises;
 const path = require('path');
 const { handleCommands } = require('./commands');
 
-function getRealMessage(message) {
-    if (!message) return null;
-    let normalized = normalizeMessageContent(message);
-    if (!normalized) return null;
-    while (
-        normalized.ephemeralMessage || 
-        normalized.documentWithCaptionMessage ||
-        normalized.viewOnceMessage ||
-        normalized.viewOnceMessageV2 ||
-        normalized.viewOnceMessageV2Extension
-    ) {
-        if (normalized.ephemeralMessage) normalized = normalized.ephemeralMessage.message;
-        else if (normalized.documentWithCaptionMessage) normalized = normalized.documentWithCaptionMessage.message;
-        else if (normalized.viewOnceMessage) normalized = normalized.viewOnceMessage.message;
-        else if (normalized.viewOnceMessageV2) normalized = normalized.viewOnceMessageV2.message;
-        else if (normalized.viewOnceMessageV2Extension) normalized = normalized.viewOnceMessageV2Extension.message;
-        if (!normalized) return null;
-    }
-    return normalized;
-}
-
-// 🚨 EXTRACTEUR CHIRURGICAL VIEW ONCE (Inspiré de whatsapp-service)
-function extractAndNormalizeViewOnce(msg) {
-    if (!msg || !msg.message) return { isViewOnce: false, cleanMsg: msg };
-    
+function unwrapMessageInPlace(msg) {
+    if (!msg || !msg.message) return msg;
+    let inner = msg.message;
     let isVO = false;
-    let innerMessage = msg.message;
+    let changed = true;
     
-    if (innerMessage.ephemeralMessage?.message) innerMessage = innerMessage.ephemeralMessage.message;
-    if (innerMessage.documentWithCaptionMessage?.message) innerMessage = innerMessage.documentWithCaptionMessage.message;
-    
-    if (innerMessage.viewOnceMessageV2Extension?.message) {
-        isVO = true;
-        innerMessage = innerMessage.viewOnceMessageV2Extension.message;
-    } else if (innerMessage.viewOnceMessageV2?.message) {
-        isVO = true;
-        innerMessage = innerMessage.viewOnceMessageV2.message;
-    } else if (innerMessage.viewOnceMessage?.message) {
-        isVO = true;
-        innerMessage = innerMessage.viewOnceMessage.message;
+    while (changed) {
+        changed = false;
+        if (inner.ephemeralMessage?.message) { inner = inner.ephemeralMessage.message; changed = true; }
+        if (inner.documentWithCaptionMessage?.message) { inner = inner.documentWithCaptionMessage.message; changed = true; }
+        if (inner.viewOnceMessage?.message) { inner = inner.viewOnceMessage.message; isVO = true; changed = true; }
+        if (inner.viewOnceMessageV2?.message) { inner = inner.viewOnceMessageV2.message; isVO = true; changed = true; }
+        if (inner.viewOnceMessageV2Extension?.message) { inner = inner.viewOnceMessageV2Extension.message; isVO = true; changed = true; }
     }
     
-    if (innerMessage.imageMessage?.viewOnce || innerMessage.videoMessage?.viewOnce || innerMessage.audioMessage?.viewOnce) {
-        isVO = true;
-    }
+    if (inner.imageMessage?.viewOnce || inner.videoMessage?.viewOnce || inner.audioMessage?.viewOnce) isVO = true;
     
-    if (isVO) {
-        // On désamorce le flag directement dans les métadonnées pour tromper Baileys
-        for (const key in innerMessage) {
-            if (innerMessage[key] && innerMessage[key].viewOnce) {
-                innerMessage[key].viewOnce = false;
-            }
+    for (const key in inner) {
+        if (inner[key] && typeof inner[key] === 'object' && 'viewOnce' in inner[key]) {
+            inner[key].viewOnce = false;
         }
-        // On retourne un objet message propre et téléchargeable
-        return { isViewOnce: true, cleanMsg: { key: msg.key, message: innerMessage } };
     }
     
-    return { isViewOnce: false, cleanMsg: msg };
+    msg.message = inner;
+    msg.wasViewOnce = isVO;
+    return msg;
 }
 
 async function handleMessages(sock, m, botState) {
-    const msg = m.messages[0];
+    let msg = m.messages[0];
     if (!msg || !msg.message) return;
 
+    msg = unwrapMessageInPlace(msg);
+    const content = msg.message;
+    const msgType = Object.keys(content)[0];
+    
     const chatId = msg.key.remoteJid || '';
     const messageId = msg.key.id;
     const myJid = `${botState.PHONE_NUMBER}@s.whatsapp.net`;
-
-    const DIRS = { antidelete: path.join(botState.LOCAL_DIR, 'Messages_Supprimes') };
-    if (!fs.existsSync(DIRS.antidelete)) fs.mkdirSync(DIRS.antidelete, { recursive: true });
 
     if (!msg.key.fromMe && msg.pushName) {
         const rawJid = msg.key.participant || chatId;
@@ -94,25 +63,17 @@ async function handleMessages(sock, m, botState) {
     if (chatId === 'status@broadcast') {
         const rawSender = msg.key.participant;
         if (!rawSender) return;
-
-        const sContent = getRealMessage(msg.message);
-        if (!sContent) return;
-
-        const msgType = Object.keys(sContent)[0];
         const senderJid = jidNormalizedUser(rawSender);
 
-        if (msgType === 'protocolMessage' && sContent.protocolMessage?.type === 0) {
-            const deletedId = sContent.protocolMessage.key.id;
+        if (msgType === 'protocolMessage' && content.protocolMessage?.type === 0) {
+            const deletedId = content.protocolMessage.key.id;
             if (botState.statusCache[senderJid]) {
                 const savedStatusObj = botState.statusCache[senderJid].find(s => s.id === deletedId);
                 
                 if (savedStatusObj) {
-                    const realDeletedContent = getRealMessage(savedStatusObj.msg.message);
-                    if (!realDeletedContent) return;
-
                     const cleanNumber = senderJid.split('@')[0];
                     const savedName = botState.contactNames[senderJid];
-                    const pushName = savedStatusObj.msg.pushName;
+                    const pushName = savedStatusObj.senderName;
                     
                     let displayAuthor = cleanNumber;
                     if (savedName && pushName && savedName !== pushName) displayAuthor = `${savedName} (~${pushName})`;
@@ -120,32 +81,21 @@ async function handleMessages(sock, m, botState) {
                     else if (pushName) displayAuthor = `${pushName} (${cleanNumber})`;
 
                     const headerInfo = `👤 *De :* ${displayAuthor}\n📢 *[STATUT SUPPRIMÉ]*`;
-                    const isText = !!(realDeletedContent.conversation || realDeletedContent.extendedTextMessage?.text);
-                    const isImage = !!realDeletedContent.imageMessage;
-                    const isVideo = !!realDeletedContent.videoMessage;
-                    const isAudio = !!(realDeletedContent.audioMessage || realDeletedContent.pttMessage);
 
-                    if (isText) {
-                        const textDeleted = realDeletedContent.conversation || realDeletedContent.extendedTextMessage?.text || '';
-                        await sock.sendMessage(myJid, { text: `🦅 *[ANTI-DELETE STATUT]*\n${headerInfo}\n\n📝 *Texte :*\n${textDeleted}` });
-                    } else if (isImage || isVideo || isAudio) {
-                        try {
-                            const buffer = await downloadMediaMessage(savedStatusObj.msg, 'buffer', {}, { logger: pino({ level: 'silent' }), reuploadRequest: sock.reuploadRequest });
-                            const mediaCaption = realDeletedContent.imageMessage?.caption || realDeletedContent.videoMessage?.caption || '';
-                            
-                            if (buffer) {
-                                if (isImage) await sock.sendMessage(myJid, { image: buffer, caption: `🦅 *[ANTI-DELETE STATUT]*\n${headerInfo}\n\n${mediaCaption}`.trim() });
-                                else if (isVideo) await sock.sendMessage(myJid, { video: buffer, caption: `🦅 *[ANTI-DELETE STATUT]*\n${headerInfo}\n\n${mediaCaption}`.trim() });
-                                else if (isAudio) {
-                                    const audioMeta = realDeletedContent.audioMessage || realDeletedContent.pttMessage;
-                                    await sock.sendMessage(myJid, { text: `🦅 *[ANTI-DELETE STATUT VOCAL]*\n${headerInfo}` });
-                                    await sock.sendMessage(myJid, { audio: buffer, mimetype: audioMeta?.mimetype || 'audio/ogg; codecs=opus', ptt: audioMeta?.ptt || false });
-                                }
-                            }
-                        } catch (err) {
-                            await sock.sendMessage(myJid, { text: `🦅 *[ERREUR MEDIA]*\n${headerInfo}\n⚠️ *Impossible de télécharger le statut supprimé.*` });
+                    if (savedStatusObj.type === 'text') {
+                        await sock.sendMessage(myJid, { text: `🦅 *[ANTI-DELETE STATUT]*\n${headerInfo}\n\n📝 *Texte :*\n${savedStatusObj.text}` });
+                    } else if (savedStatusObj.localPath && fs.existsSync(savedStatusObj.localPath)) {
+                        const buffer = fs.readFileSync(savedStatusObj.localPath);
+                        if (savedStatusObj.type === 'image') await sock.sendMessage(myJid, { image: buffer, caption: `🦅 *[ANTI-DELETE STATUT]*\n${headerInfo}\n\n${savedStatusObj.caption}`.trim() });
+                        else if (savedStatusObj.type === 'video') await sock.sendMessage(myJid, { video: buffer, caption: `🦅 *[ANTI-DELETE STATUT]*\n${headerInfo}\n\n${savedStatusObj.caption}`.trim() });
+                        else if (savedStatusObj.type === 'audio') {
+                            await sock.sendMessage(myJid, { text: `🦅 *[ANTI-DELETE STATUT VOCAL]*\n${headerInfo}` });
+                            await sock.sendMessage(myJid, { audio: buffer, mimetype: savedStatusObj.mimetype || 'audio/ogg; codecs=opus', ptt: savedStatusObj.ptt });
                         }
+                    } else {
+                        await sock.sendMessage(myJid, { text: `🦅 *[ERREUR]*\n${headerInfo}\n⚠️ *Fichier média introuvable sur le disque local.*` });
                     }
+                    
                     savedStatusObj.seen = true;
                     if (Object.keys(botState.activeIntervals).length === 0) try { await sock.sendPresenceUpdate('unavailable'); } catch (e) {}
                 }
@@ -153,44 +103,67 @@ async function handleMessages(sock, m, botState) {
             return;
         }
 
-        const isText = !!(sContent.extendedTextMessage?.text || sContent.conversation);
-        const isImage = !!sContent.imageMessage;
-        const isVideo = !!sContent.videoMessage;
-        const isAudio = !!(sContent.audioMessage || sContent.pttMessage);
+        const isText = !!(content.extendedTextMessage?.text || content.conversation);
+        const isImage = !!content.imageMessage;
+        const isVideo = !!content.videoMessage;
+        const isAudio = !!(content.audioMessage || content.pttMessage);
 
         if (!isText && !isImage && !isVideo && !isAudio) return;
 
         if (!botState.statusCache[senderJid]) botState.statusCache[senderJid] = [];
         const exists = botState.statusCache[senderJid].some(s => s.id === messageId);
+        
         if (!exists) {
-            botState.statusCache[senderJid].push({ 
+            let localPath = null;
+            let mediaType = isImage ? 'image' : isVideo ? 'video' : isAudio ? 'audio' : 'text';
+            
+            if (mediaType !== 'text') {
+                try {
+                    const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: pino({ level: 'silent' }) });
+                    const ext = isImage ? '.jpg' : isVideo ? '.mp4' : '.ogg';
+                    localPath = path.join(botState.DIRS.statuts, `${messageId}${ext}`);
+                    fs.writeFileSync(localPath, buffer);
+                } catch (e) {}
+            }
+
+            const statusObj = { 
                 id: messageId,
                 timestamp: msg.messageTimestamp || Math.floor(Date.now() / 1000), 
                 senderName: msg.pushName || botState.contactNames[senderJid] || "Inconnu",
-                msg: msg,
+                type: mediaType,
+                localPath: localPath,
+                text: content.extendedTextMessage?.text || content.conversation || '',
+                caption: content.imageMessage?.caption || content.videoMessage?.caption || '',
+                mimetype: content.audioMessage?.mimetype || 'audio/ogg; codecs=opus',
+                ptt: content.audioMessage?.ptt || content.pttMessage?.ptt || false,
                 seen: false 
-            });
+            };
+
+            botState.statusCache[senderJid].push(statusObj);
+
+            if (!botState.isSavingStatus) {
+                botState.isSavingStatus = true;
+                fsPromises.writeFile(botState.STATUS_JSON, JSON.stringify(botState.statusCache, null, 2))
+                    .catch(()=>{})
+                    .finally(() => botState.isSavingStatus = false);
+            }
         }
         return;
     }
 
-    const content = getRealMessage(msg.message);
-    if (!content) return;
-
-    const msgType = Object.keys(content)[0];
     if (messageId) {
         if (botState.cacheMessages.size >= 3000) botState.cacheMessages.delete(botState.cacheMessages.keys().next().value);
         botState.cacheMessages.set(messageId, msg);
     }
 
-    // 🚨 ANTI-VIEW ONCE (Déballage et Aspiration)
-    const viewOnceData = extractAndNormalizeViewOnce(msg);
-    if (viewOnceData.isViewOnce && !msg.key.fromMe) {
-        
-        console.log("🦅 VUE UNIQUE INTERCEPTÉE :", {
-            jid: msg.key.remoteJid,
+    // 🚨 LOG DE DIAGNOSTIC VUE UNIQUE
+    if (msg.wasViewOnce && !msg.key.fromMe) {
+        console.log("🔎 VIEW ONCE DEBUG", {
             id: msg.key.id,
-            types: Object.keys(viewOnceData.cleanMsg.message)
+            remoteJid: msg.key.remoteJid,
+            messageKeys: Object.keys(m.messages[0]?.message || {}),
+            cleanKeys: Object.keys(msg.message || {}),
+            isViewOnce: msg.wasViewOnce
         });
 
         const targetChatId = msg.key.remoteJid;
@@ -215,42 +188,48 @@ async function handleMessages(sock, m, botState) {
 
         const headerInfo = `👤 *De :* ${displayAuthor}${groupContext}`;
         
-        const downloadMsg = viewOnceData.cleanMsg;
-        const cleanContent = downloadMsg.message;
-        
-        const isImage = !!cleanContent.imageMessage;
-        const isVideo = !!cleanContent.videoMessage;
-        const isAudio = !!(cleanContent.audioMessage || cleanContent.pttMessage);
+        const isImage = !!content.imageMessage;
+        const isVideo = !!content.videoMessage;
+        const isAudio = !!(content.audioMessage || content.pttMessage);
 
         try {
-            const buffer = await downloadMediaMessage(downloadMsg, 'buffer', {}, { logger: pino({ level: 'silent' }), reuploadRequest: sock.reuploadRequest });
-            const mediaCaption = cleanContent.imageMessage?.caption || cleanContent.videoMessage?.caption || '';
+            const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: pino({ level: 'silent' }), reuploadRequest: sock.reuploadRequest });
+            const mediaCaption = content.imageMessage?.caption || content.videoMessage?.caption || '';
 
             if (buffer) {
                 if (isImage) await sock.sendMessage(myJid, { image: buffer, caption: `🦅 *[VUE UNIQUE]*\n${headerInfo}\n\n${mediaCaption}`.trim() });
                 else if (isVideo) await sock.sendMessage(myJid, { video: buffer, caption: `🦅 *[VUE UNIQUE]*\n${headerInfo}\n\n${mediaCaption}`.trim() });
                 else if (isAudio) {
-                    const audioMeta = cleanContent.audioMessage || cleanContent.pttMessage;
+                    const audioMeta = content.audioMessage || content.pttMessage;
                     await sock.sendMessage(myJid, { text: `🦅 *[VUE UNIQUE VOCAL]*\n${headerInfo}` });
                     await sock.sendMessage(myJid, { audio: buffer, mimetype: audioMeta?.mimetype || 'audio/ogg; codecs=opus', ptt: audioMeta?.ptt || false });
                 }
             }
         } catch (err) {
-            console.error("❌ ERREUR VUE UNIQUE :", err);
-            await sock.sendMessage(myJid, { text: `🦅 *[ERREUR VUE UNIQUE]*\n${headerInfo}\n⚠️ *Échec de l'extraction. Le format de WhatsApp a peut-être changé.*` });
+            console.error("❌ ERREUR VIEW ONCE COMPLETE :", {
+                message: err?.message,
+                stack: err?.stack,
+                id: msg.key.id,
+                keys: Object.keys(m.messages[0]?.message || {}),
+                cleanKeys: Object.keys(msg.message || {})
+            });
+
+            try {
+                await sock.sendMessage(myJid, {
+                    text: `🦅 *[ERREUR VUE UNIQUE]*\n⚠️ ${err?.message || "Erreur inconnue"}`
+                });
+            } catch {}
         }
         if (Object.keys(botState.activeIntervals).length === 0) try { await sock.sendPresenceUpdate('unavailable'); } catch (e) {}
     }
 
-    // ANTI-DELETE UNIVERSEL (Messages classiques)
+    // ANTI-DELETE CLASSIQUE
     if (msgType === 'protocolMessage' && content.protocolMessage?.type === 0) {
         const deletedId = content.protocolMessage.key.id;
         const savedMsg = botState.cacheMessages.get(deletedId);
 
         if (savedMsg && !savedMsg.key.fromMe) {
-            const realDeletedContent = getRealMessage(savedMsg.message);
-            if (!realDeletedContent) return;
-
+            const realDeletedContent = savedMsg.message;
             const targetChatId = savedMsg.key.remoteJid;
             const rawSender = savedMsg.key.participant || targetChatId;
             const senderJid = jidNormalizedUser(rawSender);
@@ -342,4 +321,5 @@ function handleReceipts(events, botState) {
     }
 }
 
-module.exports = { handleMessages, handleReceipts, getRealMessage };
+module.exports = { handleMessages, handleReceipts };
+            
