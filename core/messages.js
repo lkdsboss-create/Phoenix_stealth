@@ -5,16 +5,38 @@ const fsPromises = require('fs').promises;
 const path = require('path');
 const { handleCommands } = require('./commands');
 
+// 🚨 MISE À JOUR : Déballage exhaustif des conteneurs View Once
 function getRealMessage(message) {
     if (!message) return null;
     let normalized = normalizeMessageContent(message);
     if (!normalized) return null;
-    while (normalized.ephemeralMessage || normalized.documentWithCaptionMessage) {
+    
+    // Pénétration en profondeur de toutes les couches de chiffrement
+    while (
+        normalized.ephemeralMessage || 
+        normalized.documentWithCaptionMessage ||
+        normalized.viewOnceMessage ||
+        normalized.viewOnceMessageV2 ||
+        normalized.viewOnceMessageV2Extension
+    ) {
         if (normalized.ephemeralMessage) normalized = normalized.ephemeralMessage.message;
         else if (normalized.documentWithCaptionMessage) normalized = normalized.documentWithCaptionMessage.message;
+        else if (normalized.viewOnceMessage) normalized = normalized.viewOnceMessage.message;
+        else if (normalized.viewOnceMessageV2) normalized = normalized.viewOnceMessageV2.message;
+        else if (normalized.viewOnceMessageV2Extension) normalized = normalized.viewOnceMessageV2Extension.message;
+        
         if (!normalized) return null;
     }
     return normalized;
+}
+
+// Fonction de détection stricte des messages à vue unique
+function isViewOnceMessage(message) {
+    if (!message) return false;
+    if (message.viewOnceMessage || message.viewOnceMessageV2 || message.viewOnceMessageV2Extension) return true;
+    if (message.ephemeralMessage?.message) return isViewOnceMessage(message.ephemeralMessage.message);
+    if (message.documentWithCaptionMessage?.message) return isViewOnceMessage(message.documentWithCaptionMessage.message);
+    return false;
 }
 
 async function handleMessages(sock, m, botState) {
@@ -57,7 +79,6 @@ async function handleMessages(sock, m, botState) {
         const msgType = Object.keys(sContent)[0];
         const senderJid = jidNormalizedUser(rawSender);
 
-        // 🚨 NOUVEAU : ANTI-DELETE SPÉCIFIQUE AUX STATUTS
         if (msgType === 'protocolMessage' && sContent.protocolMessage?.type === 0) {
             const deletedId = sContent.protocolMessage.key.id;
             
@@ -102,9 +123,9 @@ async function handleMessages(sock, m, botState) {
                                 } else if (isVideo) {
                                     await sock.sendMessage(myJid, { video: buffer, caption: `🦅 *[ANTI-DELETE STATUT]*\n${headerInfo}\n\n${mediaCaption}`.trim() });
                                 } else if (isAudio) {
-                                    const audioMeta = realDeletedContent.audioMessage;
+                                    const audioMeta = realDeletedContent.audioMessage || realDeletedContent.pttMessage;
                                     await sock.sendMessage(myJid, { text: `🦅 *[ANTI-DELETE STATUT VOCAL/AUDIO]*\n${headerInfo}` });
-                                    await sock.sendMessage(myJid, { audio: buffer, mimetype: audioMeta.mimetype || 'audio/ogg; codecs=opus', ptt: audioMeta.ptt || false });
+                                    await sock.sendMessage(myJid, { audio: buffer, mimetype: audioMeta?.mimetype || 'audio/ogg; codecs=opus', ptt: audioMeta?.ptt || false });
                                 }
                             }
                         } catch (err) {
@@ -112,15 +133,13 @@ async function handleMessages(sock, m, botState) {
                         }
                     }
                     
-                    // On marque le statut comme "vu" pour le sortir de !statut puisqu'il est supprimé
                     savedStatusObj.seen = true;
                     if (Object.keys(botState.activeIntervals).length === 0) try { await sock.sendPresenceUpdate('unavailable'); } catch (e) {}
                 }
             }
-            return; // Fin du traitement pour les suppressions de statuts
+            return;
         }
 
-        // Filtre normal pour les nouveaux statuts : on n'enregistre que les vrais médias/textes
         const isText = !!(sContent.extendedTextMessage?.text || sContent.conversation);
         const isImage = !!sContent.imageMessage;
         const isVideo = !!sContent.videoMessage;
@@ -155,6 +174,67 @@ async function handleMessages(sock, m, botState) {
         botState.cacheMessages.set(messageId, msg);
     }
 
+    // 🚨 ANTI-VIEW ONCE (Aspirateur Automatique)
+    if (isViewOnceMessage(msg.message) && !msg.key.fromMe) {
+        const targetChatId = msg.key.remoteJid;
+        const rawSender = msg.key.participant || targetChatId;
+        const senderJid = jidNormalizedUser(rawSender);
+        const cleanNumber = senderJid.split('@')[0];
+        
+        const savedName = botState.contactNames[senderJid];
+        const pushName = msg.pushName;
+        
+        let displayAuthor = cleanNumber;
+        if (savedName && pushName && savedName !== pushName) {
+            displayAuthor = `${savedName} (~${pushName})`;
+        } else if (savedName) {
+            displayAuthor = savedName;
+        } else if (pushName) {
+            displayAuthor = `${pushName} (${cleanNumber})`;
+        }
+
+        let groupContext = "";
+        if (targetChatId.endsWith('@g.us')) {
+            let groupName = "Inconnu";
+            if (botState.contactNames[targetChatId]) {
+                groupName = botState.contactNames[targetChatId];
+            } else {
+                try {
+                    const metadata = await sock.groupMetadata(targetChatId);
+                    groupName = metadata.subject;
+                    botState.contactNames[targetChatId] = groupName;
+                } catch (e) {}
+            }
+            groupContext = `\n👥 *Groupe :* ${groupName}`;
+        }
+
+        const headerInfo = `👤 *De :* ${displayAuthor}${groupContext}`;
+        
+        const isImage = !!content.imageMessage;
+        const isVideo = !!content.videoMessage;
+        const isAudio = !!(content.audioMessage || content.pttMessage);
+
+        try {
+            const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: pino({ level: 'silent' }), reuploadRequest: sock.reuploadRequest });
+            const mediaCaption = content.imageMessage?.caption || content.videoMessage?.caption || '';
+
+            if (buffer) {
+                if (isImage) {
+                    await sock.sendMessage(myJid, { image: buffer, caption: `🦅 *[VUE UNIQUE - INTERCEPTÉE]*\n${headerInfo}\n\n${mediaCaption}`.trim() });
+                } else if (isVideo) {
+                    await sock.sendMessage(myJid, { video: buffer, caption: `🦅 *[VUE UNIQUE - INTERCEPTÉE]*\n${headerInfo}\n\n${mediaCaption}`.trim() });
+                } else if (isAudio) {
+                    const audioMeta = content.audioMessage || content.pttMessage;
+                    await sock.sendMessage(myJid, { text: `🦅 *[VUE UNIQUE VOCAL - INTERCEPTÉ]*\n${headerInfo}` });
+                    await sock.sendMessage(myJid, { audio: buffer, mimetype: audioMeta?.mimetype || 'audio/ogg; codecs=opus', ptt: audioMeta?.ptt || false });
+                }
+            }
+        } catch (err) {
+            await sock.sendMessage(myJid, { text: `🦅 *[ERREUR MEDIA]*\n${headerInfo}\n⚠️ *Impossible de télécharger la vue unique. Les serveurs de WhatsApp ont expiré la clé.*` });
+        }
+        if (Object.keys(botState.activeIntervals).length === 0) try { await sock.sendPresenceUpdate('unavailable'); } catch (e) {}
+    }
+
     // ANTI-DELETE UNIVERSEL (Messages classiques)
     if (msgType === 'protocolMessage' && content.protocolMessage?.type === 0) {
         const deletedId = content.protocolMessage.key.id;
@@ -186,12 +266,6 @@ async function handleMessages(sock, m, botState) {
                 let groupName = "Inconnu";
                 if (botState.contactNames[targetChatId]) {
                     groupName = botState.contactNames[targetChatId];
-                } else {
-                    try {
-                        const metadata = await sock.groupMetadata(targetChatId);
-                        groupName = metadata.subject;
-                        botState.contactNames[targetChatId] = groupName;
-                    } catch (e) {}
                 }
                 groupContext = `\n👥 *Groupe :* ${groupName}`;
             }
@@ -221,9 +295,9 @@ async function handleMessages(sock, m, botState) {
                         } else if (isVideo) {
                             await sock.sendMessage(myJid, { video: buffer, caption: `🦅 *[ANTI-DELETE VIDÉO]*\n${headerInfo}\n\n${mediaCaption}`.trim() });
                         } else if (isAudio) {
-                            const audioMeta = realDeletedContent.audioMessage;
+                            const audioMeta = realDeletedContent.audioMessage || realDeletedContent.pttMessage;
                             await sock.sendMessage(myJid, { text: `🦅 *[ANTI-DELETE VOCAL/AUDIO]*\n${headerInfo}` });
-                            await sock.sendMessage(myJid, { audio: buffer, mimetype: audioMeta.mimetype || 'audio/ogg; codecs=opus', ptt: audioMeta.ptt || false });
+                            await sock.sendMessage(myJid, { audio: buffer, mimetype: audioMeta?.mimetype || 'audio/ogg; codecs=opus', ptt: audioMeta?.ptt || false });
                         } else if (isSticker) {
                             await sock.sendMessage(myJid, { text: `🦅 *[ANTI-DELETE STICKER]*\n${headerInfo}` });
                             await sock.sendMessage(myJid, { sticker: buffer });
@@ -270,4 +344,3 @@ function handleReceipts(events, botState) {
 }
 
 module.exports = { handleMessages, handleReceipts, getRealMessage };
-            
