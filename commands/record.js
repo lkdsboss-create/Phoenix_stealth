@@ -1,52 +1,42 @@
-const { resolveTarget, parseDuration, formatDuration, startSimulation } = require('../core/presence');
+const { jidNormalizedUser } = require('@whiskeysockets/baileys');
 
 module.exports = {
     name: 'record',
-    aliases: ['recording', 'enregistre'],
-    description: 'Simule un enregistrement vocal vers une cible',
+    aliases: ['vocal'],
+    description: 'Simule un enregistrement',
     async execute(sock, msg, botState, ctx) {
-        // Parse identique à !type
-        let input = ctx.args[0];
-        let durationStr = ctx.args[1];
+        const myJid = `${botState.PHONE_NUMBER}@s.whatsapp.net`;
+        const arg = ctx.args.join(' ').trim();
+        let targetJid = ctx.from;
+        let targetDisplay = "Inconnu";
 
-        if (input && parseDuration(input)) {
-            durationStr = input;
-            input = null;
-        }
+        if (arg) targetJid = `${arg.replace(/[^0-9]/g, '')}@s.whatsapp.net`;
+        targetJid = jidNormalizedUser(targetJid);
 
-        const target = resolveTarget(input, msg, ctx);
-        if (target.error) {
-            await sock.sendMessage(ctx.from, { text: target.error }, { quoted: msg });
-            return;
-        }
+        if (botState.contactNames[targetJid]) targetDisplay = botState.contactNames[targetJid];
+        else if (targetJid.endsWith('@g.us')) {
+            try { targetDisplay = (await sock.groupMetadata(targetJid)).subject; } catch { targetDisplay = "Ce Groupe"; }
+        } else targetDisplay = targetJid.split('@')[0];
 
-        const durationMs = parseDuration(durationStr);
+        if (botState.activeIntervals[targetJid]) clearInterval(botState.activeIntervals[targetJid]);
+        try {
+            await sock.sendPresenceUpdate('available', targetJid);
+            await sock.sendPresenceUpdate('recording', targetJid);
+        } catch (e) { }
 
-        if (durationStr && !durationMs) {
-            await sock.sendMessage(ctx.from, {
-                text: '❌ Format de durée invalide. Exemples : 30s, 5m, 1h'
-            }, { quoted: msg });
-            return;
-        }
+        botState.activeIntervals[targetJid] = setInterval(async () => {
+            if (botState.currentSock !== sock) {
+                clearInterval(botState.activeIntervals[targetJid]);
+                delete botState.activeIntervals[targetJid];
+                return;
+            }
+            try { await sock.sendPresenceUpdate('recording', targetJid); }
+            catch (err) {
+                clearInterval(botState.activeIntervals[targetJid]);
+                delete botState.activeIntervals[targetJid];
+            }
+        }, 8000);
 
-        if (durationMs && durationMs > 4 * 60 * 60 * 1000) {
-            await sock.sendMessage(ctx.from, {
-                text: '❌ Maximum : 4 heures.'
-            }, { quoted: msg });
-            return;
-        }
-
-        const result = await startSimulation(sock, target.jid, 'recording', durationMs, target.name);
-        if (result.error) {
-            await sock.sendMessage(ctx.from, { text: result.error }, { quoted: msg });
-            return;
-        }
-
-        const durLabel = durationMs ? formatDuration(durationMs) : '∞ (jusqu\'à !stop)';
-        await sock.sendMessage(ctx.from, {
-            text: `🎤 Enregistrement simulé\n` +
-                  `👤 Cible : *${target.name}*\n` +
-                  `⏱️ Durée : ${durLabel}`
-        }, { quoted: msg });
+        await sock.sendMessage(myJid, { text: `🎙️ *Ghost Record activé pour :* ${targetDisplay}` });
     }
 };

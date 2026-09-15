@@ -1,4 +1,4 @@
-const { downloadMediaMessage } = require('toxic-baileys');
+const { downloadMediaMessage } = require('@whiskeysockets/baileys');
 const { Jimp } = require('jimp');
 const pino = require('pino');
 const { execSync } = require('child_process');
@@ -13,8 +13,10 @@ module.exports = {
     aliases: ['s', 'stiker', 'stikervideo', 'sv'],
     description: 'Convertit image/vidéo en sticker (avec légende optionnelle)',
     async execute(sock, msg, botState, ctx) {
+        const myJid = `${botState.PHONE_NUMBER}@s.whatsapp.net`;
         console.log('🎨 [STICKER] args:', ctx.args);
 
+        // Position du crop
         const argsCopy = [...ctx.args];
         let position = 'auto';
         if (['haut', 'centre', 'bas'].includes(argsCopy[0]?.toLowerCase())) {
@@ -22,33 +24,49 @@ module.exports = {
         }
         const caption = argsCopy.join(' ').trim();
 
+        // Détection média
         let mediaMsg = null;
         let mediaType = null;
         let sourceMsg = msg;
 
-        if (msg.message?.imageMessage) {
-            mediaMsg = msg.message.imageMessage;
+        const m = msg.message;
+        if (m.imageMessage) {
+            mediaMsg = m.imageMessage;
             mediaType = 'image';
-        } else if (msg.message?.videoMessage) {
-            mediaMsg = msg.message.videoMessage;
+        } else if (m.videoMessage) {
+            mediaMsg = m.videoMessage;
             mediaType = 'video';
-        } else {
-            const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
-            if (quoted?.imageMessage) {
+        } else if (m.extendedTextMessage?.contextInfo?.quotedMessage) {
+            const quoted = m.extendedTextMessage.contextInfo.quotedMessage;
+            if (quoted.imageMessage) {
                 mediaMsg = quoted.imageMessage;
                 mediaType = 'image';
-                sourceMsg = buildQuotedSource(msg, quoted, ctx);
-            } else if (quoted?.videoMessage) {
+                sourceMsg = {
+                    key: {
+                        remoteJid: ctx.from,
+                        fromMe: false,
+                        id: m.extendedTextMessage.contextInfo.stanzaId,
+                        participant: m.extendedTextMessage.contextInfo.participant
+                    },
+                    message: quoted
+                };
+            } else if (quoted.videoMessage) {
                 mediaMsg = quoted.videoMessage;
                 mediaType = 'video';
-                sourceMsg = buildQuotedSource(msg, quoted, ctx);
+                sourceMsg = {
+                    key: {
+                        remoteJid: ctx.from,
+                        fromMe: false,
+                        id: m.extendedTextMessage.contextInfo.stanzaId,
+                        participant: m.extendedTextMessage.contextInfo.participant
+                    },
+                    message: quoted
+                };
             }
         }
 
         if (!mediaMsg) {
-            await sock.sendMessage(ctx.from, {
-                text: '❌ Envoie un média avec !sticker [haut|centre|bas] [légende]'
-            }, { quoted: msg });
+            await sock.sendMessage(myJid, { text: '❌ Envoie une image/vidéo avec !sticker [haut|centre|bas] [légende]' });
             return;
         }
 
@@ -164,9 +182,7 @@ module.exports = {
             console.log(`📦 Taille : ${(stickerBuffer.length / 1024).toFixed(1)} KB`);
 
             if (stickerBuffer.length > 1024 * 1024) {
-                await sock.sendMessage(ctx.from, {
-                    text: `❌ Sticker trop gros (${(stickerBuffer.length / 1024).toFixed(0)} KB). Max 1 MB.`
-                }, { quoted: msg });
+                await sock.sendMessage(myJid, { text: `❌ Sticker trop gros (${(stickerBuffer.length / 1024).toFixed(0)} KB). Max 1 MB.` });
                 return;
             }
 
@@ -176,7 +192,7 @@ module.exports = {
 
         } catch (e) {
             console.error('❌ Erreur sticker:', e.message);
-            await sock.sendMessage(ctx.from, { text: `❌ Erreur: ${e.message}` }, { quoted: msg });
+            await sock.sendMessage(myJid, { text: `❌ Erreur: ${e.message}` });
         } finally {
             try { if (fs.existsSync(tmpPng)) fs.unlinkSync(tmpPng); } catch (_) {}
             try { if (fs.existsSync(tmpPngCaption)) fs.unlinkSync(tmpPngCaption); } catch (_) {}
@@ -186,18 +202,6 @@ module.exports = {
         }
     }
 };
-
-function buildQuotedSource(msg, quoted, ctx) {
-    return {
-        key: {
-            remoteJid: ctx.from,
-            fromMe: false,
-            id: msg.message.extendedTextMessage.contextInfo.stanzaId,
-            participant: msg.message.extendedTextMessage.contextInfo.participant
-        },
-        message: quoted
-    };
-}
 
 function addWhatsAppStyleCaption(inputPng, outputPng, txtFile, caption) {
     fs.writeFileSync(txtFile, caption, 'utf-8');

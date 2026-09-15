@@ -1,72 +1,29 @@
-const { resolveTarget, stopSimulation, stopAllSimulations, getActiveSimulations, formatDuration } = require('../core/presence');
+const { jidNormalizedUser } = require('@whiskeysockets/baileys');
 
 module.exports = {
     name: 'stop',
-    aliases: ['arrete', 'halt'],
-    description: 'Arrête les simulations de présence',
+    aliases: ['arrete'],
+    description: 'Arrête les simulations',
     async execute(sock, msg, botState, ctx) {
-        const arg = ctx.args[0];
+        const myJid = `${botState.PHONE_NUMBER}@s.whatsapp.net`;
+        const arg = ctx.args.join(' ').trim();
+        let targetJid = ctx.from;
+        let targetDisplay = "Inconnu";
 
-        // ==========================================
-        // !stop list → liste les simulations actives
-        // ==========================================
-        if (arg === 'list' || arg === 'liste') {
-            const active = getActiveSimulations();
-            if (active.length === 0) {
-                await sock.sendMessage(ctx.from, {
-                    text: '📭 Aucune simulation active.'
-                }, { quoted: msg });
-                return;
-            }
+        if (arg) targetJid = `${arg.replace(/[^0-9]/g, '')}@s.whatsapp.net`;
+        targetJid = jidNormalizedUser(targetJid);
 
-            let text = `👻 *Simulations actives (${active.length})*\n\n`;
-            for (const s of active) {
-                const icon = s.state === 'composing' ? '⌨️' : '🎤';
-                text += `${icon} *${s.name}*\n`;
-                text += `   ⏱️ Depuis ${formatDuration(s.elapsed)}`;
-                if (s.duration) text += ` / ${formatDuration(s.duration)}`;
-                text += `\n\n`;
-            }
+        if (botState.contactNames[targetJid]) targetDisplay = botState.contactNames[targetJid];
+        else if (targetJid.endsWith('@g.us')) {
+            try { targetDisplay = (await sock.groupMetadata(targetJid)).subject; } catch { targetDisplay = "Ce Groupe"; }
+        } else targetDisplay = targetJid.split('@')[0];
 
-            await sock.sendMessage(ctx.from, { text }, { quoted: msg });
-            return;
+        if (botState.activeIntervals[targetJid]) {
+            clearInterval(botState.activeIntervals[targetJid]);
+            delete botState.activeIntervals[targetJid];
         }
+        try { await sock.sendPresenceUpdate('paused', targetJid); } catch (e) { }
 
-        // ==========================================
-        // !stop → arrêt global
-        // ==========================================
-        if (!arg) {
-            const count = await stopAllSimulations(sock);
-            if (count === 0) {
-                await sock.sendMessage(ctx.from, {
-                    text: '📭 Aucune simulation active.'
-                }, { quoted: msg });
-            } else {
-                await sock.sendMessage(ctx.from, {
-                    text: `🛑 ${count} simulation(s) arrêtée(s).`
-                }, { quoted: msg });
-            }
-            return;
-        }
-
-        // ==========================================
-        // !stop <cible> → arrêt ciblé
-        // ==========================================
-        const target = resolveTarget(arg, msg, ctx);
-        if (target.error) {
-            await sock.sendMessage(ctx.from, { text: target.error }, { quoted: msg });
-            return;
-        }
-
-        const stopped = await stopSimulation(sock, target.jid);
-        if (stopped) {
-            await sock.sendMessage(ctx.from, {
-                text: `🛑 Simulation arrêtée pour *${target.name}*`
-            }, { quoted: msg });
-        } else {
-            await sock.sendMessage(ctx.from, {
-                text: `📭 Aucune simulation active pour *${target.name}*`
-            }, { quoted: msg });
-        }
+        await sock.sendMessage(myJid, { text: `🛑 *Simulations arrêtées pour :* ${targetDisplay}` });
     }
 };

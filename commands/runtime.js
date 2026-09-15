@@ -1,29 +1,15 @@
-const { formatUptime } = require('../core/stats');
+function formatUptime(ms) {
+    const s = Math.floor((ms / 1000) % 60), m = Math.floor((ms / (1000 * 60)) % 60);
+    const h = Math.floor((ms / (1000 * 60 * 60)) % 24), d = Math.floor(ms / (1000 * 60 * 60 * 24));
+    return `${d}d ${h}h ${m}m ${s}s`;
+}
 
 module.exports = {
     name: 'runtime',
-    aliases: ['uptime', 'duree', 'session'],
-    description: 'Affiche la durée d\'activité du bot',
+    aliases: ['uptime'],
+    description: 'Durée d\'activité',
     async execute(sock, msg, botState, ctx) {
-        const uptimeMs = Date.now() - botState.START_TIME;
-        const uptimeStr = formatUptime(uptimeMs);
-
-        const startDate = new Date(botState.START_TIME);
-        const startStr = startDate.toLocaleString('fr-FR');
-
-        // Mémoire utilisée
-        const mem = process.memoryUsage();
-        const memMB = (mem.rss / 1024 / 1024).toFixed(1);
-
-        // Version Node
-        const nodeVersion = process.version;
-
-        await sock.sendMessage(ctx.from, {
-            text: `⏱️ *Runtime du bot*\n\n` +
-                  `🟢 En ligne depuis : *${uptimeStr}*\n` +
-                  `📅 Démarré le : ${startStr}\n` +
-                  `💾 Mémoire : ${memMB} MB\n` +
-                  `⚙️ Node.js : ${nodeVersion}`
-        }, { quoted: msg });
+        const myJid = `${botState.PHONE_NUMBER}@s.whatsapp.net`;
+        await sock.sendMessage(myJid, { text: `⏱️ *Actif depuis :*\n\`${formatUptime(Date.now() - botState.START_TIME)}\`` });
     }
 };

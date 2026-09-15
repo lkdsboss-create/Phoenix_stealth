@@ -1,14 +1,10 @@
-const { messageCache } = require('../core/antiDelete');
-
 module.exports = {
     name: 'clean',
-    aliases: ['clearcache', 'purge'],
-    description: 'Vide le cache RAM des messages archivés',
+    aliases: ['purge'],
+    description: 'Vide le cache',
     async execute(sock, msg, botState, ctx) {
-        const before = messageCache.size;
-        messageCache.clear();
-        await sock.sendMessage(ctx.from, {
-            text: `🧹 Cache vidé : ${before} message(s) supprimé(s) de la RAM.`
-        }, { quoted: msg });
+        const myJid = `${botState.PHONE_NUMBER}@s.whatsapp.net`;
+        botState.cacheMessages.clear();
+        await sock.sendMessage(myJid, { text: "🧹 *Cache mémoire vidé !*" });
     }
 };

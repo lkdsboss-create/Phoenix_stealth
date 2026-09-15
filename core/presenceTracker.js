@@ -1,7 +1,7 @@
 // ==========================================
 // SUIVI DES PRÉSENCES
 // ==========================================
-const presenceMap = new Map();
+const presenceMap = new Map(); // clé: jid → { lastKnownPresence, lastSeen, timestamp }
 
 function updatePresence(jid, presence) {
     if (!jid || !presence) return;
