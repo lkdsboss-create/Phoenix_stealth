@@ -6,6 +6,9 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
+// Chemin de la police embarquée
+const FONT_PATH = path.join(__dirname, '..', 'assets', 'font.ttf');
+
 module.exports = {
     name: 'sticker',
     aliases: ['s', 'stiker', 'stikervideo', 'sv'],
@@ -13,7 +16,6 @@ module.exports = {
     async execute(sock, msg, botState, ctx) {
         console.log('🎨 [STICKER] args:', ctx.args);
 
-        // Paramètre optionnel de position (haut / centre / bas)
         const argsCopy = [...ctx.args];
         let position = 'auto';
         if (['haut', 'centre', 'bas'].includes(argsCopy[0]?.toLowerCase())) {
@@ -56,8 +58,10 @@ module.exports = {
 
         const tmpId = Date.now();
         const tmpPng = path.join(os.tmpdir(), `stick_${tmpId}.png`);
+        const tmpPngCaption = path.join(os.tmpdir(), `stick_cap_${tmpId}.png`);
         const tmpWebp = path.join(os.tmpdir(), `stick_${tmpId}.webp`);
         const tmpVideo = path.join(os.tmpdir(), `stick_${tmpId}.mp4`);
+        const tmpTxt = path.join(os.tmpdir(), `cap_${tmpId}.txt`);
 
         try {
             console.log('📥 Téléchargement...');
@@ -77,51 +81,48 @@ module.exports = {
                 const side = Math.min(origW, origH);
                 const cropX = Math.floor((origW - side) / 2);
 
-                // ✅ Crop intelligent : position dépend du ratio
                 let cropY;
                 let effectivePosition = position;
 
                 if (position === 'auto') {
-                    if (ratio < 0.7) {
-                        // Portrait étroit (ex : 9:16) → privilégie le HAUT
-                        effectivePosition = 'haut';
-                    } else if (ratio < 1) {
-                        // Portrait normal (ex : 4:5) → légèrement au-dessus du centre
-                        effectivePosition = 'centre-haut';
-                    } else {
-                        // Carré ou paysage → centre
-                        effectivePosition = 'centre';
-                    }
+                    if (ratio < 0.7) effectivePosition = 'haut';
+                    else if (ratio < 1) effectivePosition = 'centre-haut';
+                    else effectivePosition = 'centre';
                 }
 
                 if (effectivePosition === 'haut') {
-                    cropY = Math.floor((origH - side) * 0.05); // 5% en haut
+                    cropY = Math.floor((origH - side) * 0.05);
                 } else if (effectivePosition === 'centre-haut') {
-                    cropY = Math.floor((origH - side) * 0.3); // 30% en haut
+                    cropY = Math.floor((origH - side) * 0.3);
                 } else if (effectivePosition === 'bas') {
                     cropY = Math.floor((origH - side) * 0.95);
                 } else {
-                    // centre
                     cropY = Math.floor((origH - side) / 2);
                 }
 
-                console.log(`📐 Crop: ${origW}x${origH} (ratio ${ratio.toFixed(2)}) → ${side}x${side} @ (${cropX},${cropY}) [${effectivePosition}]`);
+                console.log(`📐 Crop: ${origW}x${origH} → ${side}x${side} @ (${cropX},${cropY}) [${effectivePosition}]`);
 
                 image.crop({ x: cropX, y: cropY, w: side, h: side });
                 image.resize({ w: 512, h: 512 });
 
-                if (finalCaption) {
-                    console.log('✏️ Ajout légende :', finalCaption);
-                    await addCaption(image, finalCaption);
-                }
-
                 const pngBuffer = await image.getBuffer('image/png');
                 fs.writeFileSync(tmpPng, pngBuffer);
 
-                execSync(
-                    `ffmpeg -y -i "${tmpPng}" -vcodec libwebp -lossless 0 -q:v 80 -preset default -an -vsync 0 "${tmpWebp}"`,
-                    { stdio: 'ignore' }
-                );
+                // ✅ Légende via ffmpeg drawtext
+                if (finalCaption) {
+                    console.log('✏️ Ajout légende via ffmpeg :', finalCaption);
+                    addCaptionWithFfmpeg(tmpPng, tmpPngCaption, tmpTxt, finalCaption);
+
+                    execSync(
+                        `ffmpeg -y -i "${tmpPngCaption}" -vcodec libwebp -lossless 0 -q:v 80 -preset default -an -vsync 0 "${tmpWebp}"`,
+                        { stdio: 'ignore' }
+                    );
+                } else {
+                    execSync(
+                        `ffmpeg -y -i "${tmpPng}" -vcodec libwebp -lossless 0 -q:v 80 -preset default -an -vsync 0 "${tmpWebp}"`,
+                        { stdio: 'ignore' }
+                    );
+                }
 
             } else {
                 // ==========================================
@@ -130,8 +131,6 @@ module.exports = {
                 console.log('🎬 Traitement vidéo...');
                 fs.writeFileSync(tmpVideo, buffer);
 
-                // Expression ffmpeg pour calculer le cropY
-                // ratio < 0.7 → haut (5%) ; ratio < 1 → centre-haut (30%) ; sinon centre
                 let cropExpr;
                 if (position === 'haut') {
                     cropExpr = `(ih-min(iw\\,ih))*0.05`;
@@ -140,13 +139,12 @@ module.exports = {
                 } else if (position === 'centre') {
                     cropExpr = `(ih-min(iw\\,ih))/2`;
                 } else {
-                    // auto : crop adaptatif
                     cropExpr = `if(lt(iw/ih\\,0.7)\\,(ih-min(iw\\,ih))*0.05\\,if(lt(iw/ih\\,1)\\,(ih-min(iw\\,ih))*0.3\\,(ih-min(iw\\,ih))/2))`;
                 }
 
                 const vfFilter = `fps=15,crop=min(iw\\,ih):min(iw\\,ih):(iw-min(iw\\,ih))/2:${cropExpr},scale=512:512`;
 
-                console.log('🎞️ Conversion vidéo → WebP animé (3s, crop adaptatif)...');
+                console.log('🎞️ Conversion vidéo → WebP animé...');
                 execSync(
                     `ffmpeg -y -i "${tmpVideo}" ` +
                     `-t 3 ` +
@@ -158,7 +156,6 @@ module.exports = {
 
                 try { fs.unlinkSync(tmpVideo); } catch (_) {}
 
-                // Vérification taille
                 const stats = fs.statSync(tmpWebp);
                 if (stats.size > 1024 * 1024) {
                     console.log('⚠️ Sticker > 1 MB, recompression...');
@@ -189,8 +186,10 @@ module.exports = {
             await sock.sendMessage(ctx.from, { text: `❌ Erreur: ${e.message}` }, { quoted: msg });
         } finally {
             try { if (fs.existsSync(tmpPng)) fs.unlinkSync(tmpPng); } catch (_) {}
+            try { if (fs.existsSync(tmpPngCaption)) fs.unlinkSync(tmpPngCaption); } catch (_) {}
             try { if (fs.existsSync(tmpWebp)) fs.unlinkSync(tmpWebp); } catch (_) {}
             try { if (fs.existsSync(tmpVideo)) fs.unlinkSync(tmpVideo); } catch (_) {}
+            try { if (fs.existsSync(tmpTxt)) fs.unlinkSync(tmpTxt); } catch (_) {}
         }
     }
 };
@@ -211,55 +210,28 @@ function buildQuotedSource(msg, quoted, ctx) {
     };
 }
 
-async function addCaption(image, caption) {
-    const width = image.bitmap.width;
-    const height = image.bitmap.height;
+/**
+ * Ajoute une légende sur l'image en utilisant le filtre drawtext de ffmpeg.
+ * Écrit d'abord le texte dans un fichier pour éviter les problèmes d'échappement.
+ */
+function addCaptionWithFfmpeg(inputPng, outputPng, txtFile, caption) {
+    // Écrit le texte dans un fichier (évite les soucis d'échappement ffmpeg)
+    fs.writeFileSync(txtFile, caption, 'utf-8');
 
-    const fontWhite = await Jimp.loadFont(Jimp.FONT_SANS_32_WHITE);
-    const fontWhiteSmall = await Jimp.loadFont(Jimp.FONT_SANS_16_WHITE);
+    // Taille de police adaptative
+    const fontSize = caption.length > 40 ? 22 : (caption.length > 25 ? 28 : 36);
+    const boxBorder = 15;
 
-    const font = caption.length > 25 ? fontWhiteSmall : fontWhite;
-    const fontSize = caption.length > 25 ? 16 : 32;
-    const lineHeight = fontSize + 6;
-    const padding = 12;
+    // Le filtre drawtext :
+    // - textfile : le fichier contenant le texte
+    // - fontfile : la police TTF embarquée
+    // - box=1 / boxcolor=black@0.7 : bandeau semi-transparent derrière le texte
+    // - x=(w-text_w)/2 : centré horizontalement
+    // - y=h-th-20 : 20px au-dessus du bas
+    const filter = `drawtext=textfile='${txtFile}':fontfile='${FONT_PATH}':fontsize=${fontSize}:fontcolor=white:x=(w-text_w)/2:y=h-th-20:box=1:boxcolor=black@0.7:boxborderw=${boxBorder}:line_spacing=6`;
 
-    const maxWidth = width - padding * 2;
-    const lines = wrapText(caption, font, maxWidth);
-
-    const captionHeight = lines.length * lineHeight + padding * 2;
-    const captionY = height - captionHeight;
-
-    const black = Jimp.rgbaToInt(0, 0, 0, 180);
-    for (let y = captionY; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-            image.setPixelColor(black, x, y);
-        }
-    }
-
-    let y = captionY + padding;
-    for (const line of lines) {
-        const lineWidth = Jimp.measureText(font, line);
-        const x = Math.max(padding, (width - lineWidth) / 2);
-        image.print(font, x, y, line);
-        y += lineHeight;
-    }
-}
-
-function wrapText(text, font, maxWidth) {
-    const words = text.split(' ');
-    const lines = [];
-    let current = '';
-
-    for (const word of words) {
-        const test = current ? `${current} ${word}` : word;
-        const width = Jimp.measureText(font, test);
-        if (width > maxWidth && current) {
-            lines.push(current);
-            current = word;
-        } else {
-            current = test;
-        }
-    }
-    if (current) lines.push(current);
-    return lines;
+    execSync(
+        `ffmpeg -y -i "${inputPng}" -vf "${filter}" "${outputPng}"`,
+        { stdio: 'ignore' }
+    );
 }
