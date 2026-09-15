@@ -110,27 +110,27 @@ async function startStealthBot() {
         botState.currentSock = sock;
         sock.ev.on('creds.update', saveCreds);
 
-        // ==========================================
-        // AFFICHAGE DU QR CODE DANS LE TERMINAL
-        // ==========================================
         sock.ev.on('connection.update', async (update) => {
             const { connection, lastDisconnect, qr } = update;
 
-            // Affichage du QR dans le terminal dès qu'il est disponible
+            // ==========================================
+            // AFFICHAGE DU QR CODE
+            // ==========================================
             if (qr) {
                 console.clear();
                 console.log('\n======================================================');
-                console.log('📱 SCANNE CE QR CODE avec WhatsApp sur ton téléphone');
+                console.log('📱 SCANNE CE QR CODE avec WhatsApp');
                 console.log('   (WhatsApp → Appareils connectés → Associer un appareil)');
                 console.log('======================================================\n');
                 
                 qrcode.generate(qr, { small: true });
                 
-                console.log('\n======================================================');
-                console.log('⏳ Le QR expire toutes les ~20 secondes. Un nouveau sera généré automatiquement.');
-                console.log('======================================================\n');
+                console.log('\n⏳ Le QR expire dans ~20 secondes. Un nouveau sera généré automatiquement.\n');
             }
-            
+
+            // ==========================================
+            // GESTION DE LA FERMETURE
+            // ==========================================
             if (connection === 'close') {
                 for (const jid in botState.activeIntervals) clearInterval(botState.activeIntervals[jid]);
                 botState.activeIntervals = {};
@@ -138,30 +138,63 @@ async function startStealthBot() {
 
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
                 const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-                
-                console.log(`🔌 Connexion fermée. Code: ${statusCode} - ${lastDisconnect?.error?.message}`);
 
-                // Nettoyage si session corrompue
-                if (statusCode === 401 || statusCode === 428) {
-                    console.log('🧹 Nettoyage des identifiants obsolètes...');
+                console.log(`🔌 Connexion fermée. Code: ${statusCode}`);
+
+                // Vérifie si une session valide existe déjà
+                const credsExist = fs.existsSync(path.join(AUTH_DIR, 'creds.json'));
+
+                // 🧹 Nettoyage UNIQUEMENT en cas de loggedOut confirmé
+                if (statusCode === 401 && !shouldReconnect) {
+                    console.log('🧹 Session expirée (loggedOut confirmé). Nettoyage...');
                     try {
-                        const CLEAN_AUTH_DIR = process.env.AUTH_DIR || './auth_info';
-                        if (fs.existsSync(CLEAN_AUTH_DIR)) {
-                            fs.rmSync(CLEAN_AUTH_DIR, { recursive: true, force: true });
+                        if (fs.existsSync(AUTH_DIR)) {
+                            fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+                            console.log('✅ Dossier auth_info supprimé.');
                         }
-                    } catch (e) {}
+                    } catch (e) {
+                        console.error('Erreur nettoyage:', e.message);
+                    }
                 }
 
-                // En mode QR, on ne nettoie PAS sur 408 car c'est normal (QR expiré)
-                if (statusCode === 440) {
-                    console.log('⚠️ CONFLIT 440: Session ouverte ailleurs.');
-                    if (!reconnectTimer) reconnectTimer = setTimeout(() => { reconnectTimer = null; startStealthBot(); }, 15000);
-                } else if (shouldReconnect) {
-                    console.log('🔄 Reconnexion dans 3 secondes...');
-                    if (!reconnectTimer) reconnectTimer = setTimeout(() => { reconnectTimer = null; startStealthBot(); }, 3000);
+                // ==========================================
+                // RECONNEXION SELON LE CODE D'ERREUR
+                // ==========================================
+                let delay = 3000;
+                let shouldRestart = true;
+
+                if (statusCode === 515) {
+                    console.log('🔄 Restart required (515) — reconnexion dans 2s...');
+                    delay = 2000;
+                } else if (statusCode === 440) {
+                    console.log('⚠️ Session ouverte ailleurs (440). Attente 15s...');
+                    delay = 15000;
+                } else if (statusCode === 408) {
+                    // 408 = QR attempts ended. Normal si l'utilisateur n'a pas scanné.
+                    console.log('⏱️ QR expiré (408). Nouveau QR dans 3s...');
+                    delay = 3000;
+                } else if (statusCode === 401 && !shouldReconnect) {
+                    console.log('❌ Session perdue. Nouveau QR requis.');
+                    delay = 3000;
+                } else if (!shouldReconnect) {
+                    console.log('❌ Déconnecté par l\'utilisateur. Arrêt.');
+                    shouldRestart = false;
+                } else if (credsExist) {
+                    console.log('🔄 Reconnexion avec session existante dans 3s...');
+                    delay = 3000;
                 } else {
-                    console.log('❌ Session déconnectée. Relance le bot pour un nouveau QR.');
+                    console.log('🔄 Reconnexion dans 3s...');
+                    delay = 3000;
                 }
+
+                if (shouldRestart && !reconnectTimer) {
+                    console.log(`⏱️ Prochaine tentative dans ${Math.round(delay/1000)}s...`);
+                    reconnectTimer = setTimeout(() => { 
+                        reconnectTimer = null; 
+                        startStealthBot(); 
+                    }, delay);
+                }
+
             } else if (connection === 'open') {
                 console.log('\n==================================================');
                 console.log('🦅 PHOENIX ONLINE — QR CODE VALIDÉ !');
@@ -170,7 +203,9 @@ async function startStealthBot() {
             }
         });
 
-        // Routage des événements
+        // ==========================================
+        // ROUTAGE DES ÉVÉNEMENTS
+        // ==========================================
         sock.ev.on('messages.upsert', async (m) => {
             try {
                 if (m.type !== 'notify') return;
@@ -195,4 +230,3 @@ async function startStealthBot() {
 }
 
 startStealthBot();
-
