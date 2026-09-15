@@ -21,37 +21,58 @@ process.on('unhandledRejection', (reason) => {
 });
 
 // ==========================================
+// 🚫 FILTRE DE LOGS AU PLUS BAS NIVEAU
+// (intercepte libsignal, Baileys, etc.)
+// ==========================================
+const FILTER_PATTERNS = [
+    'Closing session:',
+    'Closing open session',
+    'currentRatchet',
+    'SessionEntry',
+    '_chains:',
+    'ephemeralKeyPair:',
+    'lastRemoteEphemeralKey:',
+    'previousCounter:',
+    'rootKey:',
+    'indexInfo:',
+    'baseKey:',
+    'baseKeyType:',
+    'remoteIdentityKey:',
+    'pendingPreKey:',
+    'registrationId:',
+    'chainKey:',
+    'chainType:',
+    'messageKeys:',
+    'signedKeyId:',
+    'preKeyId:',
+    'pubKey:',
+    'privKey:'
+];
+
+const originalStdoutWrite = process.stdout.write.bind(process.stdout);
+const originalStderrWrite = process.stderr.write.bind(process.stderr);
+
+function shouldFilter(chunk) {
+    const str = typeof chunk === 'string' ? chunk : chunk.toString();
+    return FILTER_PATTERNS.some(p => str.includes(p));
+}
+
+process.stdout.write = (chunk, ...args) => {
+    if (shouldFilter(chunk)) return true;
+    return originalStdoutWrite(chunk, ...args);
+};
+
+process.stderr.write = (chunk, ...args) => {
+    if (shouldFilter(chunk)) return true;
+    return originalStderrWrite(chunk, ...args);
+};
+
+// ==========================================
 // SERVEUR
 // ==========================================
 const app = express();
 app.get('/', (req, res) => res.send('Noyau Phoenix Actif.'));
 app.listen(process.env.PORT || 3000, () => console.log(`🌐 Serveur Web actif.`));
-
-// ==========================================
-// FILTRE DE LOGS
-// ==========================================
-const FILTERED = [
-    'Closing session:', 'Closing open session', 'currentRatchet',
-    'SessionEntry', '_chains:', 'ephemeralKeyPair:',
-    'lastRemoteEphemeralKey:', 'previousCounter:', 'rootKey:',
-    'indexInfo:', 'baseKey:', 'baseKeyType:', 'remoteIdentityKey:',
-    'pendingPreKey:', 'registrationId:', 'chainKey:', 'chainType:',
-    'messageKeys:', 'signedKeyId:', 'preKeyId:'
-];
-
-const originalLog = console.log;
-console.log = (...args) => {
-    const first = typeof args[0] === 'string' ? args[0] : '';
-    if (FILTERED.some(f => first.includes(f))) return;
-    originalLog.apply(console, args);
-};
-
-const originalError = console.error;
-console.error = (...args) => {
-    const first = typeof args[0] === 'string' ? args[0] : '';
-    if (FILTERED.some(f => first.includes(f))) return;
-    originalError.apply(console, args);
-};
 
 // ==========================================
 // ÉTAT GLOBAL
@@ -71,6 +92,7 @@ if (fs.existsSync(NAMES_FILE)) {
         for (const [key, name] of Object.entries(rawContacts)) {
             cleanContacts[jidNormalizedUser(key)] = name;
         }
+        console.log(`📇 ${Object.keys(cleanContacts).length} contact(s) chargé(s)`);
     } catch (e) { }
 }
 
@@ -90,23 +112,66 @@ const botState = {
     currentSock: null,
     onlineUsers: new Map(),
     subscribedJids: new Set(),
-    loginMode: null // 'qr' ou 'pairing'
+    loginMode: null
 };
 
 global.botState = botState;
 if (!globalThis.lidPhoneCache) globalThis.lidPhoneCache = new Map();
 
 // ==========================================
-// SAUVEGARDE CONTACTS
+// FLAGS PERSISTANTS
 // ==========================================
+let PROCESS_PAIRING_REQUESTED = false;
+let PROCESS_LAST_QR = '';
+let PROCESS_HAS_CONNECTED = false;
+
+function saveContactsNow() {
+    try {
+        fs.writeFileSync(botState.NAMES_FILE, JSON.stringify(botState.contactNames, null, 2));
+    } catch (e) { }
+}
+
 let saveContactsTimer = null;
 function scheduleSaveContacts() {
     if (saveContactsTimer) clearTimeout(saveContactsTimer);
-    saveContactsTimer = setTimeout(() => {
+    saveContactsTimer = setTimeout(saveContactsNow, 3000);
+}
+
+// ==========================================
+// 🚦 QUEUE DE SUBSCRIPTION (rate-limit safe)
+// ==========================================
+const subscriptionQueue = [];
+let isProcessingQueue = false;
+let lastSubscribeTime = 0;
+const MIN_SUBSCRIBE_INTERVAL = 200; // 200ms entre chaque subscribe
+
+function enqueueSubscribe(sock, jid) {
+    if (!jid) return;
+    if (botState.subscribedJids.has(jid)) return;
+    if (subscriptionQueue.includes(jid)) return;
+
+    subscriptionQueue.push(jid);
+    botState.subscribedJids.add(jid); // marqué immédiatement pour éviter les doublons
+
+    if (!isProcessingQueue) processSubscriptionQueue(sock);
+}
+
+async function processSubscriptionQueue(sock) {
+    isProcessingQueue = true;
+
+    while (subscriptionQueue.length > 0) {
+        const jid = subscriptionQueue.shift();
+        const now = Date.now();
+        const wait = MIN_SUBSCRIBE_INTERVAL - (now - lastSubscribeTime);
+        if (wait > 0) await new Promise(r => setTimeout(r, wait));
+
         try {
-            fs.writeFileSync(botState.NAMES_FILE, JSON.stringify(botState.contactNames, null, 2));
+            await sock.presenceSubscribe(jid);
+            lastSubscribeTime = Date.now();
         } catch (e) { }
-    }, 3000);
+    }
+
+    isProcessingQueue = false;
 }
 
 // ==========================================
@@ -128,23 +193,26 @@ setInterval(() => {
     }
 }, 3600000);
 
-// ==========================================
-// VERSION STATIQUE
-// ==========================================
 const WHATSAPP_VERSION = [2, 3000, 1043857760];
 
 // ==========================================
-// CHOIX DU MODE DE CONNEXION
+// CHOIX MODE
 // ==========================================
 function askLoginMode() {
     return new Promise((resolve) => {
-        // Vérifie si une session existe déjà
         const AUTH_DIR = process.env.AUTH_DIR || './auth_info';
         const credsExist = fs.existsSync(path.join(AUTH_DIR, 'creds.json'));
 
         if (credsExist) {
-            console.log('\n🔐 Session existante détectée → connexion automatique...\n');
+            console.log('\n🔐 Session existante → connexion automatique...\n');
             resolve('existing');
+            return;
+        }
+
+        const isTTY = process.stdin.isTTY && process.stdout.isTTY;
+        if (!isTTY) {
+            console.log('\n⚠️ Pas de TTY → 📱 QR par défaut\n');
+            resolve('qr');
             return;
         }
 
@@ -155,29 +223,28 @@ function askLoginMode() {
 
         console.log('\n╔════════════════════════════════════════════════════╗');
         console.log('║  🦅 PHOENIX STEALTH — MODE DE CONNEXION            ║');
-        console.log('╠════════════════════════════════════════════════════╣');
-        console.log('║                                                    ║');
         console.log('║   1 → 📱 QR Code                                   ║');
-        console.log('║       (scanner avec un 2ème appareil)              ║');
-        console.log('║                                                    ║');
         console.log('║   2 → 🔢 Pairing Code                              ║');
-        console.log('║       (taper un code sur WhatsApp)                 ║');
-        console.log('║                                                    ║');
-        console.log('╚════════════════════════════════════════════════════╝\n');
+        console.log('╚════════════════════════════════════════════════════╝');
+        console.log('⏱️  15 secondes pour choisir\n');
+
+        let answered = false;
+        const timeoutId = setTimeout(() => {
+            if (answered) return;
+            answered = true;
+            try { rl.close(); } catch (e) { }
+            console.log('\n⏱️ Timeout → 📱 QR par défaut\n');
+            resolve('qr');
+        }, 15000);
 
         rl.question('👉 Ton choix (1 ou 2) : ', (answer) => {
+            if (answered) return;
+            answered = true;
+            clearTimeout(timeoutId);
             rl.close();
             const choice = answer.trim();
-            if (choice === '2') {
-                console.log('\n✅ Mode sélectionné : 🔢 Pairing Code\n');
-                resolve('pairing');
-            } else if (choice === '1') {
-                console.log('\n✅ Mode sélectionné : 📱 QR Code\n');
-                resolve('qr');
-            } else {
-                console.log('\n⚠️ Choix invalide → QR Code par défaut\n');
-                resolve('qr');
-            }
+            console.log(choice === '2' ? '\n✅ Mode : 🔢 Pairing Code\n' : '\n✅ Mode : 📱 QR Code\n');
+            resolve(choice === '2' ? 'pairing' : 'qr');
         });
     });
 }
@@ -202,7 +269,7 @@ async function startStealthBot() {
             logger: pino({ level: 'silent' }),
             auth: state,
             markOnlineOnConnect: false,
-            syncFullHistory: false,
+            syncFullHistory: true,
             browser: ['Chrome (Linux)', '', ''],
             connectTimeoutMs: 60000,
             defaultQueryTimeoutMs: 60000,
@@ -213,78 +280,66 @@ async function startStealthBot() {
         botState.currentSock = sock;
         sock.ev.on('creds.update', saveCreds);
 
-        // ==========================================
-        // MODE DE CONNEXION
-        // ==========================================
-        let pairingRequested = false;
         let pairingTimer = null;
 
         sock.ev.on('connection.update', async (update) => {
             const { connection, lastDisconnect, qr } = update;
 
-            // ==========================================
-            // AFFICHAGE QR (uniquement si mode 'qr')
-            // ==========================================
-            if (qr && botState.loginMode === 'qr') {
-                console.clear();
-                console.log('\n======================================================');
-                console.log('📱 SCANNE CE QR CODE avec WhatsApp');
-                console.log('   (WhatsApp → Appareils connectés → Associer un appareil)');
-                console.log('======================================================\n');
-                qrcode.generate(qr, { small: true });
-                console.log('\n⏳ Le QR expire dans ~20 secondes. Un nouveau sera généré automatiquement.\n');
+            // QR (une seule fois par QR unique, et pas après connexion)
+            if (qr && botState.loginMode === 'qr' && !PROCESS_HAS_CONNECTED) {
+                if (qr !== PROCESS_LAST_QR) {
+                    PROCESS_LAST_QR = qr;
+                    console.clear();
+                    console.log('\n======================================================');
+                    console.log('📱 SCANNE CE QR CODE avec WhatsApp');
+                    console.log('======================================================\n');
+                    qrcode.generate(qr, { small: true });
+                    console.log('\n⏳ Le QR expire dans ~20 secondes.\n');
+                }
             }
 
-            // ==========================================
-            // PAIRE CODE (uniquement si mode 'pairing')
-            // ==========================================
-            if (qr && botState.loginMode === 'pairing' && !sock.authState.creds.registered && !pairingRequested) {
-                pairingRequested = true;
-                console.log('\n🔢 Mode pairing code — envoi de la demande...');
+            // Pairing code (une seule fois par processus)
+            if (qr && botState.loginMode === 'pairing'
+                && !sock.authState.creds.registered
+                && !PROCESS_PAIRING_REQUESTED
+                && !PROCESS_HAS_CONNECTED) {
+
+                PROCESS_PAIRING_REQUESTED = true;
+                console.log('\n🔢 Mode pairing — demande du code...');
 
                 if (pairingTimer) clearTimeout(pairingTimer);
                 pairingTimer = setTimeout(async () => {
                     try {
-                        console.log(`📞 Demande de code pour ${botState.PHONE_NUMBER}...`);
                         const code = await sock.requestPairingCode(botState.PHONE_NUMBER);
-
                         console.log('\n======================================================');
-                        console.log(`🎯 TON CODE DE JUMELAGE : ${code?.match(/.{1,4}/g)?.join('-')}`);
+                        console.log(`🎯 CODE DE JUMELAGE : ${code?.match(/.{1,4}/g)?.join('-')}`);
                         console.log('======================================================');
-                        console.log('📖 Comment faire :');
-                        console.log('   1. Ouvre WhatsApp');
-                        console.log('   2. Paramètres → Appareils connectés');
-                        console.log('   3. Associer un appareil');
-                        console.log('   4. Choisis "Associer avec un numéro de téléphone"');
-                        console.log('   5. Tape le code ci-dessus');
+                        console.log('📖 Paramètres → Appareils connectés → Associer');
+                        console.log('   → "Avec un numéro de téléphone" → Tape le code');
                         console.log('======================================================\n');
                     } catch (err) {
                         console.error('❌ Erreur pairing:', err.message);
-                        pairingRequested = false;
                     }
                 }, 5000);
             }
 
-            // ==========================================
-            // CONNEXION FERMÉE
-            // ==========================================
             if (connection === 'close') {
                 if (pairingTimer) clearTimeout(pairingTimer);
                 for (const jid in botState.activeIntervals) clearInterval(botState.activeIntervals[jid]);
                 botState.activeIntervals = {};
                 if (botState.currentSock === sock) botState.currentSock = null;
 
-                pairingRequested = false;
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
                 const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
                 console.log(`🔌 Connexion fermée. Code: ${statusCode}`);
 
                 if (statusCode === 401 || statusCode === 408 || statusCode === 428) {
-                    console.log('🧹 Nettoyage session corrompue...');
                     try {
                         if (fs.existsSync(AUTH_DIR)) fs.rmSync(AUTH_DIR, { recursive: true, force: true });
                     } catch (e) { }
-                    // Redemande le mode au prochain démarrage
+                    PROCESS_PAIRING_REQUESTED = false;
+                    PROCESS_LAST_QR = '';
+                    PROCESS_HAS_CONNECTED = false;
                     botState.loginMode = null;
                 }
 
@@ -294,11 +349,11 @@ async function startStealthBot() {
                     delay = 30000;
                     attemptCount = 0;
                 }
+                if (statusCode === 503) delay = 5000;
 
                 if (shouldReconnect && !reconnectTimer) {
                     reconnectTimer = setTimeout(() => {
                         reconnectTimer = null;
-                        // Si la session a été supprimée, on redemande le mode
                         if (!botState.loginMode) {
                             askLoginMode().then((mode) => {
                                 botState.loginMode = mode === 'existing' ? 'qr' : mode;
@@ -310,6 +365,8 @@ async function startStealthBot() {
                     }, delay);
                 }
             } else if (connection === 'open') {
+                PROCESS_HAS_CONNECTED = true;
+                PROCESS_PAIRING_REQUESTED = true;
                 attemptCount = 0;
                 console.log('\n==================================================');
                 console.log('🦅 PHOENIX ONLINE');
@@ -318,27 +375,44 @@ async function startStealthBot() {
             }
         });
 
-        // ==========================================
-        // LID MAPPING
-        // ==========================================
-        sock.ev.on('lid-mapping.update', (map) => {
+        // 📚 HISTORIQUE (capture les contacts SANS subscribe en masse)
+        sock.ev.on('messaging-history.set', ({ chats, contacts, messages, isLatest }) => {
             try {
-                let updated = 0;
-                for (const [lid, pn] of Object.entries(map || {})) {
-                    const lidNum = String(lid).split('@')[0].split(':')[0];
-                    const phone = String(pn).split('@')[0].split(':')[0].replace(/\D/g, '');
-                    if (lidNum && phone) {
-                        globalThis.lidPhoneCache.set(lidNum, phone);
-                        updated++;
+                let added = 0;
+                for (const contact of contacts || []) {
+                    if (contact.id && contact.notify && contact.notify.trim().length > 1) {
+                        if (!botState.contactNames[contact.id]) {
+                            botState.contactNames[contact.id] = contact.notify;
+                            added++;
+                        }
                     }
+                    // ⚠️ PAS de presenceSubscribe ici → trop de requêtes d'un coup
                 }
-                if (updated > 0) console.log(`📇 [LID] +${updated} (total : ${globalThis.lidPhoneCache.size})`);
+                if (added > 0) {
+                    saveContactsNow();
+                    console.log(`📚 [HISTORY] +${added} contact(s) (total : ${Object.keys(botState.contactNames).length})`);
+                }
+                if (isLatest) console.log(`✅ [HISTORY] Sync complète`);
             } catch (e) { }
         });
 
-        // ==========================================
-        // CONTACTS
-        // ==========================================
+        // 📇 LID MAPPING (log seulement les NOUVEAUX)
+        sock.ev.on('lid-mapping.update', (map) => {
+            try {
+                let newOnes = 0;
+                for (const [lid, pn] of Object.entries(map || {})) {
+                    const lidNum = String(lid).split('@')[0].split(':')[0];
+                    const phone = String(pn).split('@')[0].split(':')[0].replace(/\D/g, '');
+                    if (lidNum && phone && !globalThis.lidPhoneCache.has(lidNum)) {
+                        globalThis.lidPhoneCache.set(lidNum, phone);
+                        newOnes++;
+                    }
+                }
+                if (newOnes > 0) console.log(`📇 [LID] +${newOnes} (total : ${globalThis.lidPhoneCache.size})`);
+            } catch (e) { }
+        });
+
+        // 📇 CONTACTS (capture noms, subscribe en queue)
         sock.ev.on('contacts.upsert', async (contacts) => {
             let newNames = 0;
             for (const contact of contacts || []) {
@@ -348,22 +422,18 @@ async function startStealthBot() {
                         newNames++;
                     }
                 }
-                if (contact.id && !botState.subscribedJids.has(contact.id)) {
-                    try {
-                        await sock.presenceSubscribe(contact.id);
-                        botState.subscribedJids.add(contact.id);
-                    } catch (e) { }
+                // Subscribe en queue lente
+                if (contact.id && !contact.id.endsWith('@g.us')) {
+                    enqueueSubscribe(sock, contact.id);
                 }
             }
             if (newNames > 0) {
-                console.log(`📇 [CONTACTS] +${newNames} nom(s) mémorisé(s)`);
+                console.log(`📇 [CONTACTS] +${newNames}`);
                 scheduleSaveContacts();
             }
         });
 
-        // ==========================================
-        // ABONNEMENT PRÉSENCES
-        // ==========================================
+        // 📡 ABONNEMENT PRÉSENCES uniquement pour les contacts qui écrivent
         sock.ev.on('messages.upsert', async (m) => {
             if (m.type !== 'notify') return;
             for (const msg of m.messages) {
@@ -377,18 +447,13 @@ async function startStealthBot() {
                     }
                 }
 
-                if (jid && !jid.endsWith('@g.us') && jid !== 'status@broadcast' && !botState.subscribedJids.has(jid)) {
-                    try {
-                        await sock.presenceSubscribe(jid);
-                        botState.subscribedJids.add(jid);
-                    } catch (e) { }
+                if (jid && !jid.endsWith('@g.us') && jid !== 'status@broadcast') {
+                    enqueueSubscribe(sock, jid);
                 }
             }
         });
 
-        // ==========================================
-        // PRÉSENCES
-        // ==========================================
+        // 📡 PRÉSENCES
         sock.ev.on('presence.update', ({ id, presences }) => {
             for (const jid in (presences || {})) {
                 const status = presences[jid].lastKnownPresence;
@@ -405,9 +470,7 @@ async function startStealthBot() {
             }
         });
 
-        // ==========================================
-        // MESSAGES
-        // ==========================================
+        // 📩 MESSAGES
         sock.ev.on('messages.upsert', async (m) => {
             try {
                 if (m.type !== 'notify') return;
@@ -417,9 +480,7 @@ async function startStealthBot() {
             }
         });
 
-        // ==========================================
-        // ACCUSÉS DE RÉCEPTION
-        // ==========================================
+        // 📬 ACCUSÉS
         sock.ev.on('message-receipt.update', (events) => {
             try {
                 handleDeliveryReceipt(events);
@@ -433,9 +494,6 @@ async function startStealthBot() {
     }
 }
 
-// ==========================================
-// DÉMARRAGE
-// ==========================================
 async function main() {
     botState.loginMode = await askLoginMode();
     if (botState.loginMode === 'existing') botState.loginMode = 'qr';
