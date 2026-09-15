@@ -5,6 +5,7 @@ const fs = require('fs');
 const fsPromises = require('fs').promises;
 const path = require('path');
 const qrcode = require('qrcode-terminal');
+const readline = require('readline');
 
 const { handleMessages, handleReceipts } = require('./core/messages');
 const { handleDeliveryReceipt } = require('./core/silentTracker');
@@ -88,7 +89,8 @@ const botState = {
     isSavingStatus: false,
     currentSock: null,
     onlineUsers: new Map(),
-    subscribedJids: new Set()
+    subscribedJids: new Set(),
+    loginMode: null // 'qr' ou 'pairing'
 };
 
 global.botState = botState;
@@ -132,6 +134,55 @@ setInterval(() => {
 const WHATSAPP_VERSION = [2, 3000, 1043857760];
 
 // ==========================================
+// CHOIX DU MODE DE CONNEXION
+// ==========================================
+function askLoginMode() {
+    return new Promise((resolve) => {
+        // Vérifie si une session existe déjà
+        const AUTH_DIR = process.env.AUTH_DIR || './auth_info';
+        const credsExist = fs.existsSync(path.join(AUTH_DIR, 'creds.json'));
+
+        if (credsExist) {
+            console.log('\n🔐 Session existante détectée → connexion automatique...\n');
+            resolve('existing');
+            return;
+        }
+
+        const rl = readline.createInterface({
+            input: process.stdin,
+            output: process.stdout
+        });
+
+        console.log('\n╔════════════════════════════════════════════════════╗');
+        console.log('║  🦅 PHOENIX STEALTH — MODE DE CONNEXION            ║');
+        console.log('╠════════════════════════════════════════════════════╣');
+        console.log('║                                                    ║');
+        console.log('║   1 → 📱 QR Code                                   ║');
+        console.log('║       (scanner avec un 2ème appareil)              ║');
+        console.log('║                                                    ║');
+        console.log('║   2 → 🔢 Pairing Code                              ║');
+        console.log('║       (taper un code sur WhatsApp)                 ║');
+        console.log('║                                                    ║');
+        console.log('╚════════════════════════════════════════════════════╝\n');
+
+        rl.question('👉 Ton choix (1 ou 2) : ', (answer) => {
+            rl.close();
+            const choice = answer.trim();
+            if (choice === '2') {
+                console.log('\n✅ Mode sélectionné : 🔢 Pairing Code\n');
+                resolve('pairing');
+            } else if (choice === '1') {
+                console.log('\n✅ Mode sélectionné : 📱 QR Code\n');
+                resolve('qr');
+            } else {
+                console.log('\n⚠️ Choix invalide → QR Code par défaut\n');
+                resolve('qr');
+            }
+        });
+    });
+}
+
+// ==========================================
 // MOTEUR
 // ==========================================
 let reconnectTimer = null;
@@ -163,6 +214,111 @@ async function startStealthBot() {
         sock.ev.on('creds.update', saveCreds);
 
         // ==========================================
+        // MODE DE CONNEXION
+        // ==========================================
+        let pairingRequested = false;
+        let pairingTimer = null;
+
+        sock.ev.on('connection.update', async (update) => {
+            const { connection, lastDisconnect, qr } = update;
+
+            // ==========================================
+            // AFFICHAGE QR (uniquement si mode 'qr')
+            // ==========================================
+            if (qr && botState.loginMode === 'qr') {
+                console.clear();
+                console.log('\n======================================================');
+                console.log('📱 SCANNE CE QR CODE avec WhatsApp');
+                console.log('   (WhatsApp → Appareils connectés → Associer un appareil)');
+                console.log('======================================================\n');
+                qrcode.generate(qr, { small: true });
+                console.log('\n⏳ Le QR expire dans ~20 secondes. Un nouveau sera généré automatiquement.\n');
+            }
+
+            // ==========================================
+            // PAIRE CODE (uniquement si mode 'pairing')
+            // ==========================================
+            if (qr && botState.loginMode === 'pairing' && !sock.authState.creds.registered && !pairingRequested) {
+                pairingRequested = true;
+                console.log('\n🔢 Mode pairing code — envoi de la demande...');
+
+                if (pairingTimer) clearTimeout(pairingTimer);
+                pairingTimer = setTimeout(async () => {
+                    try {
+                        console.log(`📞 Demande de code pour ${botState.PHONE_NUMBER}...`);
+                        const code = await sock.requestPairingCode(botState.PHONE_NUMBER);
+
+                        console.log('\n======================================================');
+                        console.log(`🎯 TON CODE DE JUMELAGE : ${code?.match(/.{1,4}/g)?.join('-')}`);
+                        console.log('======================================================');
+                        console.log('📖 Comment faire :');
+                        console.log('   1. Ouvre WhatsApp');
+                        console.log('   2. Paramètres → Appareils connectés');
+                        console.log('   3. Associer un appareil');
+                        console.log('   4. Choisis "Associer avec un numéro de téléphone"');
+                        console.log('   5. Tape le code ci-dessus');
+                        console.log('======================================================\n');
+                    } catch (err) {
+                        console.error('❌ Erreur pairing:', err.message);
+                        pairingRequested = false;
+                    }
+                }, 5000);
+            }
+
+            // ==========================================
+            // CONNEXION FERMÉE
+            // ==========================================
+            if (connection === 'close') {
+                if (pairingTimer) clearTimeout(pairingTimer);
+                for (const jid in botState.activeIntervals) clearInterval(botState.activeIntervals[jid]);
+                botState.activeIntervals = {};
+                if (botState.currentSock === sock) botState.currentSock = null;
+
+                pairingRequested = false;
+                const statusCode = lastDisconnect?.error?.output?.statusCode;
+                const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+                console.log(`🔌 Connexion fermée. Code: ${statusCode}`);
+
+                if (statusCode === 401 || statusCode === 408 || statusCode === 428) {
+                    console.log('🧹 Nettoyage session corrompue...');
+                    try {
+                        if (fs.existsSync(AUTH_DIR)) fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+                    } catch (e) { }
+                    // Redemande le mode au prochain démarrage
+                    botState.loginMode = null;
+                }
+
+                let delay = 3000;
+                if (statusCode === 440) delay = 15000;
+                if (statusCode === 405 && attemptCount >= MAX_ATTEMPTS) {
+                    delay = 30000;
+                    attemptCount = 0;
+                }
+
+                if (shouldReconnect && !reconnectTimer) {
+                    reconnectTimer = setTimeout(() => {
+                        reconnectTimer = null;
+                        // Si la session a été supprimée, on redemande le mode
+                        if (!botState.loginMode) {
+                            askLoginMode().then((mode) => {
+                                botState.loginMode = mode === 'existing' ? 'qr' : mode;
+                                startStealthBot();
+                            });
+                        } else {
+                            startStealthBot();
+                        }
+                    }, delay);
+                }
+            } else if (connection === 'open') {
+                attemptCount = 0;
+                console.log('\n==================================================');
+                console.log('🦅 PHOENIX ONLINE');
+                console.log('==================================================\n');
+                try { await sock.sendPresenceUpdate('unavailable'); } catch (e) { }
+            }
+        });
+
+        // ==========================================
         // LID MAPPING
         // ==========================================
         sock.ev.on('lid-mapping.update', (map) => {
@@ -185,7 +341,6 @@ async function startStealthBot() {
         // ==========================================
         sock.ev.on('contacts.upsert', async (contacts) => {
             let newNames = 0;
-
             for (const contact of contacts || []) {
                 if (contact.id && contact.notify && contact.notify.trim().length > 1) {
                     if (!botState.contactNames[contact.id]) {
@@ -200,7 +355,6 @@ async function startStealthBot() {
                     } catch (e) { }
                 }
             }
-
             if (newNames > 0) {
                 console.log(`📇 [CONTACTS] +${newNames} nom(s) mémorisé(s)`);
                 scheduleSaveContacts();
@@ -252,55 +406,6 @@ async function startStealthBot() {
         });
 
         // ==========================================
-        // CONNEXION
-        // ==========================================
-        sock.ev.on('connection.update', async (update) => {
-            const { connection, lastDisconnect, qr } = update;
-
-            if (qr) {
-                console.clear();
-                console.log('\n======================================================');
-                console.log('📱 SCANNE CE QR CODE avec WhatsApp');
-                console.log('======================================================\n');
-                qrcode.generate(qr, { small: true });
-                console.log('\n⏳ Le QR expire dans ~20 secondes.\n');
-            }
-
-            if (connection === 'close') {
-                for (const jid in botState.activeIntervals) clearInterval(botState.activeIntervals[jid]);
-                botState.activeIntervals = {};
-                if (botState.currentSock === sock) botState.currentSock = null;
-
-                const statusCode = lastDisconnect?.error?.output?.statusCode;
-                const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-                console.log(`🔌 Connexion fermée. Code: ${statusCode}`);
-
-                if (statusCode === 401 || statusCode === 408 || statusCode === 428) {
-                    try {
-                        if (fs.existsSync(AUTH_DIR)) fs.rmSync(AUTH_DIR, { recursive: true, force: true });
-                    } catch (e) { }
-                }
-
-                let delay = 3000;
-                if (statusCode === 440) delay = 15000;
-                if (statusCode === 405 && attemptCount >= MAX_ATTEMPTS) {
-                    delay = 30000;
-                    attemptCount = 0;
-                }
-
-                if (shouldReconnect && !reconnectTimer) {
-                    reconnectTimer = setTimeout(() => { reconnectTimer = null; startStealthBot(); }, delay);
-                }
-            } else if (connection === 'open') {
-                attemptCount = 0;
-                console.log('\n==================================================');
-                console.log('🦅 PHOENIX ONLINE');
-                console.log('==================================================\n');
-                try { await sock.sendPresenceUpdate('unavailable'); } catch (e) { }
-            }
-        });
-
-        // ==========================================
         // MESSAGES
         // ==========================================
         sock.ev.on('messages.upsert', async (m) => {
@@ -328,4 +433,13 @@ async function startStealthBot() {
     }
 }
 
-startStealthBot();
+// ==========================================
+// DÉMARRAGE
+// ==========================================
+async function main() {
+    botState.loginMode = await askLoginMode();
+    if (botState.loginMode === 'existing') botState.loginMode = 'qr';
+    startStealthBot();
+}
+
+main();
