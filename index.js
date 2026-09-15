@@ -68,7 +68,7 @@ const botState = {
     isSavingContacts: false,
     currentSock: null,
     recentMedia: new Map(),    // ✅ AJOUT
-    albumCache: new Map()      // ✅ AJOUT
+	albumCache: new Map()      // ✅ AJOUT
 
 };
 

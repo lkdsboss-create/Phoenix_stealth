@@ -25,7 +25,16 @@ function loadCommands() {
             console.error(`❌ Erreur chargement ${file}:`, e.message);
         }
     }
-    console.log(`🥷 ${commands.size} commande(s) chargée(s) en mode furtif.`);
+
+    // Compter uniquement les commandes uniques (sans les alias)
+    const uniqueCommands = new Set();
+    for (const cmd of commands.values()) {
+        uniqueCommands.add(cmd);
+    }
+
+    // Afficher en détail
+    const cmdList = [...uniqueCommands].map(c => c.name).join(', ');
+    console.log(`🥷 ${uniqueCommands.size} commande(s) chargée(s) : ${cmdList}`);
 }
 
 loadCommands();

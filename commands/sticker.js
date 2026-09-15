@@ -6,8 +6,8 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-// Chemin de la police embarquée
-const FONT_PATH = path.join(__dirname, '..', 'assets', 'font.ttf');
+// Chemin de la police Roboto embarquée
+const FONT_PATH = path.join(__dirname, '..', 'assets', 'Roboto-Regular.ttf');
 
 module.exports = {
     name: 'sticker',
@@ -108,10 +108,9 @@ module.exports = {
                 const pngBuffer = await image.getBuffer('image/png');
                 fs.writeFileSync(tmpPng, pngBuffer);
 
-                // ✅ Légende via ffmpeg drawtext
                 if (finalCaption) {
-                    console.log('✏️ Ajout légende via ffmpeg :', finalCaption);
-                    addCaptionWithFfmpeg(tmpPng, tmpPngCaption, tmpTxt, finalCaption);
+                    console.log('✏️ Ajout légende style WhatsApp :', finalCaption);
+                    addWhatsAppStyleCaption(tmpPng, tmpPngCaption, tmpTxt, finalCaption);
 
                     execSync(
                         `ffmpeg -y -i "${tmpPngCaption}" -vcodec libwebp -lossless 0 -q:v 80 -preset default -an -vsync 0 "${tmpWebp}"`,
@@ -211,24 +210,24 @@ function buildQuotedSource(msg, quoted, ctx) {
 }
 
 /**
- * Ajoute une légende sur l'image en utilisant le filtre drawtext de ffmpeg.
- * Écrit d'abord le texte dans un fichier pour éviter les problèmes d'échappement.
+ * Ajoute une légende fidèle au style de l'éditeur de texte WhatsApp :
+ * police Roboto, fond semi-transparent avec flou, texte blanc centré.
  */
-function addCaptionWithFfmpeg(inputPng, outputPng, txtFile, caption) {
+function addWhatsAppStyleCaption(inputPng, outputPng, txtFile, caption) {
     // Écrit le texte dans un fichier (évite les soucis d'échappement ffmpeg)
     fs.writeFileSync(txtFile, caption, 'utf-8');
 
-    // Taille de police adaptative
-    const fontSize = caption.length > 40 ? 22 : (caption.length > 25 ? 28 : 36);
+    // Taille de police adaptative (fidèle à WhatsApp : ~28px sur 512px)
+    const fontSize = caption.length > 40 ? 20 : (caption.length > 25 ? 24 : 28);
     const boxBorder = 15;
 
-    // Le filtre drawtext :
+    // Filtre drawtext :
     // - textfile : le fichier contenant le texte
-    // - fontfile : la police TTF embarquée
-    // - box=1 / boxcolor=black@0.7 : bandeau semi-transparent derrière le texte
+    // - fontfile : la police Roboto embarquée
+    // - box=1 / boxcolor=black@0.5 : bandeau semi-transparent (fidèle à WhatsApp)
     // - x=(w-text_w)/2 : centré horizontalement
-    // - y=h-th-20 : 20px au-dessus du bas
-    const filter = `drawtext=textfile='${txtFile}':fontfile='${FONT_PATH}':fontsize=${fontSize}:fontcolor=white:x=(w-text_w)/2:y=h-th-20:box=1:boxcolor=black@0.7:boxborderw=${boxBorder}:line_spacing=6`;
+    // - y=h-th-30 : 30px au-dessus du bas
+    const filter = `drawtext=textfile='${txtFile}':fontfile='${FONT_PATH}':fontsize=${fontSize}:fontcolor=white:x=(w-text_w)/2:y=h-th-30:box=1:boxcolor=black@0.5:boxborderw=${boxBorder}:line_spacing=6`;
 
     execSync(
         `ffmpeg -y -i "${inputPng}" -vf "${filter}" "${outputPng}"`,
