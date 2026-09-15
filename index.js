@@ -66,7 +66,10 @@ const botState = {
     activeIntervals: {},
     statusCache: {},
     isSavingContacts: false,
-    currentSock: null
+    currentSock: null,
+    recentMedia: new Map(),    // ✅ AJOUT
+    albumCache: new Map()      // ✅ AJOUT
+
 };
 
 // Nettoyage périodique de la RAM
