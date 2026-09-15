@@ -6,8 +6,9 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-// Chemin de la police Roboto embarquée
-const FONT_PATH = path.join(__dirname, '..', 'assets', 'Roboto-Regular.ttf');
+// Configuration des métadonnées du pack
+const PACK_NAME = 'Phoenix Stickers';
+const PACK_AUTHOR = 'Phoenix Bot';
 
 module.exports = {
     name: 'sticker',
@@ -49,7 +50,8 @@ module.exports = {
 
         if (!mediaMsg) {
             await sock.sendMessage(ctx.from, {
-                text: '❌ Envoie un média avec !sticker [haut|centre|bas] [légende]'
+                text: '❌ Envoie une image ou vidéo avec la légende !sticker [haut|centre|bas] [légende]\n' +
+                      'Ou réponds à un média avec !sticker [texte]'
             }, { quoted: msg });
             return;
         }
@@ -71,6 +73,9 @@ module.exports = {
             );
 
             if (mediaType === 'image') {
+                // ==========================================
+                // IMAGE → STICKER
+                // ==========================================
                 console.log('🖼️ Traitement image...');
                 const image = await Jimp.fromBuffer(buffer);
 
@@ -111,16 +116,11 @@ module.exports = {
                 if (finalCaption) {
                     console.log('✏️ Ajout légende style WhatsApp :', finalCaption);
                     addWhatsAppStyleCaption(tmpPng, tmpPngCaption, tmpTxt, finalCaption);
-
-                    execSync(
-                        `ffmpeg -y -i "${tmpPngCaption}" -vcodec libwebp -lossless 0 -q:v 80 -preset default -an -vsync 0 "${tmpWebp}"`,
-                        { stdio: 'ignore' }
-                    );
+                    // Ajout des métadonnées EXIF (Pack name + Author)
+                    addStickerMetadata(tmpPngCaption, tmpWebp, PACK_NAME, PACK_AUTHOR);
                 } else {
-                    execSync(
-                        `ffmpeg -y -i "${tmpPng}" -vcodec libwebp -lossless 0 -q:v 80 -preset default -an -vsync 0 "${tmpWebp}"`,
-                        { stdio: 'ignore' }
-                    );
+                    // Ajout des métadonnées EXIF
+                    addStickerMetadata(tmpPng, tmpWebp, PACK_NAME, PACK_AUTHOR);
                 }
 
             } else {
@@ -141,29 +141,21 @@ module.exports = {
                     cropExpr = `if(lt(iw/ih\\,0.7)\\,(ih-min(iw\\,ih))*0.05\\,if(lt(iw/ih\\,1)\\,(ih-min(iw\\,ih))*0.3\\,(ih-min(iw\\,ih))/2))`;
                 }
 
-                const vfFilter = `fps=15,crop=min(iw\\,ih):min(iw\\,ih):(iw-min(iw\\,ih))/2:${cropExpr},scale=512:512`;
+                const vfFilter = `fps=12,crop=min(iw\\,ih):min(iw\\,ih):(iw-min(iw\\,ih))/2:${cropExpr},scale=512:512`;
 
-                console.log('🎞️ Conversion vidéo → WebP animé...');
+                console.log('🎞️ Conversion vidéo → WebP animé (10s max, fps=12)...');
+                // Ajout des métadonnées directement dans la commande ffmpeg
                 execSync(
                     `ffmpeg -y -i "${tmpVideo}" ` +
-                    `-t 3 ` +
+                    `-t 10 ` +
                     `-vf "${vfFilter}" ` +
                     `-vcodec libwebp -lossless 0 -q:v 50 -preset default -loop 0 -an -vsync 0 ` +
+                    `-metadata "title=${PACK_NAME}" -metadata "artist=${PACK_AUTHOR}" ` +
                     `-s 512:512 "${tmpWebp}"`,
                     { stdio: 'ignore' }
                 );
 
                 try { fs.unlinkSync(tmpVideo); } catch (_) {}
-
-                const stats = fs.statSync(tmpWebp);
-                if (stats.size > 1024 * 1024) {
-                    console.log('⚠️ Sticker > 1 MB, recompression...');
-                    execSync(
-                        `ffmpeg -y -i "${tmpWebp}" -vcodec libwebp -lossless 0 -q:v 25 -loop 0 -an "${tmpWebp}.tmp" ` +
-                        `&& mv "${tmpWebp}.tmp" "${tmpWebp}"`,
-                        { stdio: 'ignore' }
-                    );
-                }
             }
 
             const stickerBuffer = fs.readFileSync(tmpWebp);
@@ -209,28 +201,24 @@ function buildQuotedSource(msg, quoted, ctx) {
     };
 }
 
-/**
- * Ajoute une légende fidèle au style de l'éditeur de texte WhatsApp :
- * police Roboto, fond semi-transparent avec flou, texte blanc centré.
- */
 function addWhatsAppStyleCaption(inputPng, outputPng, txtFile, caption) {
-    // Écrit le texte dans un fichier (évite les soucis d'échappement ffmpeg)
     fs.writeFileSync(txtFile, caption, 'utf-8');
-
-    // Taille de police adaptative (fidèle à WhatsApp : ~28px sur 512px)
     const fontSize = caption.length > 40 ? 20 : (caption.length > 25 ? 24 : 28);
     const boxBorder = 15;
+    const filter = `drawtext=textfile='${txtFile}':fontfile='${path.join(__dirname, '..', 'assets', 'Roboto-Regular.ttf')}':fontsize=${fontSize}:fontcolor=white:x=(w-text_w)/2:y=h-th-30:box=1:boxcolor=black@0.5:boxborderw=${boxBorder}:line_spacing=6`;
+    execSync(`ffmpeg -y -i "${inputPng}" -vf "${filter}" "${outputPng}"`, { stdio: 'ignore' });
+}
 
-    // Filtre drawtext :
-    // - textfile : le fichier contenant le texte
-    // - fontfile : la police Roboto embarquée
-    // - box=1 / boxcolor=black@0.5 : bandeau semi-transparent (fidèle à WhatsApp)
-    // - x=(w-text_w)/2 : centré horizontalement
-    // - y=h-th-30 : 30px au-dessus du bas
-    const filter = `drawtext=textfile='${txtFile}':fontfile='${FONT_PATH}':fontsize=${fontSize}:fontcolor=white:x=(w-text_w)/2:y=h-th-30:box=1:boxcolor=black@0.5:boxborderw=${boxBorder}:line_spacing=6`;
-
+/**
+ * Ajoute les métadonnées de pack via ffmpeg.
+ * Pour les images : conversion PNG → WebP avec métadonnées.
+ * Pour les vidéos : les métadonnées sont déjà injectées dans la commande ffmpeg de conversion.
+ */
+function addStickerMetadata(inputImage, outputWebp, packName, authorName) {
     execSync(
-        `ffmpeg -y -i "${inputPng}" -vf "${filter}" "${outputPng}"`,
+        `ffmpeg -y -i "${inputImage}" -vcodec libwebp -lossless 0 -q:v 80 -preset default -an -vsync 0 ` +
+        `-metadata "title=${packName}" -metadata "artist=${authorName}" ` +
+        `"${outputWebp}"`,
         { stdio: 'ignore' }
     );
 }
