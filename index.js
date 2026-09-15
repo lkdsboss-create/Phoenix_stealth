@@ -1,8 +1,9 @@
 const express = require('express');
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, jidNormalizedUser } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, jidNormalizedUser, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const fs = require('fs');
 const path = require('path');
+const qrcode = require('qrcode-terminal');
 
 // Importation de tes modules externes
 const { handleMessages, handleReceipts } = require('./core/messages');
@@ -56,7 +57,6 @@ if (fs.existsSync(NAMES_FILE)) {
 }
 
 const botState = {
-    // N'oublie pas de mettre ton numéro ici si tu ne passes pas par les variables d'environnement
     PHONE_NUMBER: process.env.PHONE_NUMBER || "22896081989", 
     START_TIME: Date.now(),
     LOCAL_DIR: LOCAL_DIR,
@@ -83,99 +83,94 @@ setInterval(() => {
 }, 3600000);
 
 // ==========================================
-// MOTEUR DE CONNEXION
+// MOTEUR DE CONNEXION (MODE QR)
 // ==========================================
 let reconnectTimer = null;
-let pairingTimer = null;
 
 async function startStealthBot() {
     try {
-        console.log('\n📡 [SYSTEM] Initialisation du Noyau Phoenix Stealth (Modulaire)...');
+        console.log('\n📡 [SYSTEM] Initialisation du Noyau Phoenix Stealth (Mode QR)...');
         
         const AUTH_DIR = process.env.AUTH_DIR || './auth_info';
         const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
 
+        const { version } = await fetchLatestBaileysVersion();
+        console.log(`📦 Version API WhatsApp : ${version.join('.')}`);
+
         const sock = makeWASocket({
+            version,
             logger: pino({ level: 'silent' }), 
             auth: state,
             markOnlineOnConnect: false, 
             syncFullHistory: false,
-            browser: ["Ubuntu", "Chrome", "20.0.04"],
+            browser: ['Chrome (Linux)', '', ''],
             getMessage: async (key) => botState.cacheMessages.get(key.id)?.message || undefined
         });
 
         botState.currentSock = sock;
         sock.ev.on('creds.update', saveCreds);
 
-        let pairingRequested = false;
-
+        // ==========================================
+        // AFFICHAGE DU QR CODE DANS LE TERMINAL
+        // ==========================================
         sock.ev.on('connection.update', async (update) => {
-            const { connection, lastDisconnect } = update;
+            const { connection, lastDisconnect, qr } = update;
+
+            // Affichage du QR dans le terminal dès qu'il est disponible
+            if (qr) {
+                console.clear();
+                console.log('\n======================================================');
+                console.log('📱 SCANNE CE QR CODE avec WhatsApp sur ton téléphone');
+                console.log('   (WhatsApp → Appareils connectés → Associer un appareil)');
+                console.log('======================================================\n');
+                
+                qrcode.generate(qr, { small: true });
+                
+                console.log('\n======================================================');
+                console.log('⏳ Le QR expire toutes les ~20 secondes. Un nouveau sera généré automatiquement.');
+                console.log('======================================================\n');
+            }
             
             if (connection === 'close') {
-                if (pairingTimer) clearTimeout(pairingTimer);
                 for (const jid in botState.activeIntervals) clearInterval(botState.activeIntervals[jid]);
                 botState.activeIntervals = {};
                 if (botState.currentSock === sock) botState.currentSock = null;
 
-                pairingRequested = false; 
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
                 const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
                 
                 console.log(`🔌 Connexion fermée. Code: ${statusCode} - ${lastDisconnect?.error?.message}`);
 
-                // AUTO-NETTOYAGE : Si la session expire (408), échoue (401) ou demande une précondition (428),
-                // on supprime le dossier auth_info pour repartir sur une base saine instantanément.
-                if (statusCode === 401 || statusCode === 408 || statusCode === 428) {
-                    console.log('🧹 Nettoyage automatique des identifiants obsolètes...');
+                // Nettoyage si session corrompue
+                if (statusCode === 401 || statusCode === 428) {
+                    console.log('🧹 Nettoyage des identifiants obsolètes...');
                     try {
                         const CLEAN_AUTH_DIR = process.env.AUTH_DIR || './auth_info';
                         if (fs.existsSync(CLEAN_AUTH_DIR)) {
                             fs.rmSync(CLEAN_AUTH_DIR, { recursive: true, force: true });
-                            console.log('✅ Dossier auth_info supprimé avec succès.');
                         }
-                    } catch (e) {
-                        console.error('Erreur lors du nettoyage :', e.message);
-                    }
+                    } catch (e) {}
                 }
 
+                // En mode QR, on ne nettoie PAS sur 408 car c'est normal (QR expiré)
                 if (statusCode === 440) {
                     console.log('⚠️ CONFLIT 440: Session ouverte ailleurs.');
                     if (!reconnectTimer) reconnectTimer = setTimeout(() => { reconnectTimer = null; startStealthBot(); }, 15000);
                 } else if (shouldReconnect) {
-                    console.log('🔄 Reconnexion en cours dans 3 secondes...');
+                    console.log('🔄 Reconnexion dans 3 secondes...');
                     if (!reconnectTimer) reconnectTimer = setTimeout(() => { reconnectTimer = null; startStealthBot(); }, 3000);
                 } else {
-                    console.log('🔄 Redémarrage pour générer un nouveau code...');
-                    if (!reconnectTimer) reconnectTimer = setTimeout(() => { reconnectTimer = null; startStealthBot(); }, 3000);
+                    console.log('❌ Session déconnectée. Relance le bot pour un nouveau QR.');
                 }
             } else if (connection === 'open') {
                 console.log('\n==================================================');
-                console.log('🦅 PHOENIX ONLINE — STEALTH (Modulaire)');
+                console.log('🦅 PHOENIX ONLINE — QR CODE VALIDÉ !');
                 console.log('==================================================\n');
                 try { await sock.sendPresenceUpdate('unavailable'); } catch (e) {}
             }
-
-            // DÉCLENCHEMENT SÉCURISÉ : On demande le code dès que la socket tente de se connecter
-            if (connection === 'connecting' && !sock.authState.creds.registered && !pairingRequested) {
-                pairingRequested = true;
-                pairingTimer = setTimeout(async () => {
-                    try {
-                        console.log(`📱 Demande de code de pairage pour ${botState.PHONE_NUMBER}...`);
-                        let code = await sock.requestPairingCode(botState.PHONE_NUMBER);
-                        console.log(`\n======================================================`);
-                        console.log(`🎯 TON CODE DE JUMELAGE : ${code?.match(/.{1,4}/g)?.join('-')}`);
-                        console.log(`======================================================\n`);
-                    } catch (err) { 
-                        console.error('Erreur pairing:', err.message);
-                        pairingRequested = false; 
-                    }
-                }, 4000);
-            }
         });
 
-
-        // Routage des événements vers les fichiers modulaires
+        // Routage des événements
         sock.ev.on('messages.upsert', async (m) => {
             try {
                 if (m.type !== 'notify') return;
@@ -200,3 +195,4 @@ async function startStealthBot() {
 }
 
 startStealthBot();
+
