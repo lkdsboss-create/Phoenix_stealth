@@ -110,7 +110,7 @@ async function startStealthBot() {
         let pairingRequested = false;
 
         sock.ev.on('connection.update', async (update) => {
-            const { connection, lastDisconnect, qr } = update;
+            const { connection, lastDisconnect } = update;
             
             if (connection === 'close') {
                 if (pairingTimer) clearTimeout(pairingTimer);
@@ -124,6 +124,21 @@ async function startStealthBot() {
                 
                 console.log(`🔌 Connexion fermée. Code: ${statusCode} - ${lastDisconnect?.error?.message}`);
 
+                // AUTO-NETTOYAGE : Si la session expire (408), échoue (401) ou demande une précondition (428),
+                // on supprime le dossier auth_info pour repartir sur une base saine instantanément.
+                if (statusCode === 401 || statusCode === 408 || statusCode === 428) {
+                    console.log('🧹 Nettoyage automatique des identifiants obsolètes...');
+                    try {
+                        const CLEAN_AUTH_DIR = process.env.AUTH_DIR || './auth_info';
+                        if (fs.existsSync(CLEAN_AUTH_DIR)) {
+                            fs.rmSync(CLEAN_AUTH_DIR, { recursive: true, force: true });
+                            console.log('✅ Dossier auth_info supprimé avec succès.');
+                        }
+                    } catch (e) {
+                        console.error('Erreur lors du nettoyage :', e.message);
+                    }
+                }
+
                 if (statusCode === 440) {
                     console.log('⚠️ CONFLIT 440: Session ouverte ailleurs.');
                     if (!reconnectTimer) reconnectTimer = setTimeout(() => { reconnectTimer = null; startStealthBot(); }, 15000);
@@ -131,7 +146,8 @@ async function startStealthBot() {
                     console.log('🔄 Reconnexion en cours dans 3 secondes...');
                     if (!reconnectTimer) reconnectTimer = setTimeout(() => { reconnectTimer = null; startStealthBot(); }, 3000);
                 } else {
-                    console.log('❌ Session déconnectée. Nouveau code requis.');
+                    console.log('🔄 Redémarrage pour générer un nouveau code...');
+                    if (!reconnectTimer) reconnectTimer = setTimeout(() => { reconnectTimer = null; startStealthBot(); }, 3000);
                 }
             } else if (connection === 'open') {
                 console.log('\n==================================================');
@@ -140,11 +156,9 @@ async function startStealthBot() {
                 try { await sock.sendPresenceUpdate('unavailable'); } catch (e) {}
             }
 
-            // CORRECTION : On demande le code uniquement si la socket est en phase de connexion/enregistrement
-            // et que le client n'est pas déjà enregistré.
-            if (!sock.authState.creds.registered && !pairingRequested) {
+            // DÉCLENCHEMENT SÉCURISÉ : On demande le code dès que la socket tente de se connecter
+            if (connection === 'connecting' && !sock.authState.creds.registered && !pairingRequested) {
                 pairingRequested = true;
-                // On s'assure d'attendre un court instant que la liaison WS soit stable
                 pairingTimer = setTimeout(async () => {
                     try {
                         console.log(`📱 Demande de code de pairage pour ${botState.PHONE_NUMBER}...`);
@@ -156,7 +170,7 @@ async function startStealthBot() {
                         console.error('Erreur pairing:', err.message);
                         pairingRequested = false; 
                     }
-                }, 5000); // Délai allongé à 5 secondes pour éviter le "Connection Closed"
+                }, 4000);
             }
         });
 
