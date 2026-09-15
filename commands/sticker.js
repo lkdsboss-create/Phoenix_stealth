@@ -13,12 +13,17 @@ module.exports = {
     async execute(sock, msg, botState, ctx) {
         console.log('🎨 [STICKER] args:', ctx.args);
 
-        // La légende est le texte après "!sticker"
-        const caption = ctx.args.join(' ').trim();
+        // Paramètre optionnel de position (haut / centre / bas)
+        const argsCopy = [...ctx.args];
+        let position = 'auto';
+        if (['haut', 'centre', 'bas'].includes(argsCopy[0]?.toLowerCase())) {
+            position = argsCopy.shift().toLowerCase();
+        }
+        const caption = argsCopy.join(' ').trim();
 
-        // Détection image ou vidéo
+        // Détection média
         let mediaMsg = null;
-        let mediaType = null; // 'image' ou 'video'
+        let mediaType = null;
         let sourceMsg = msg;
 
         if (msg.message?.imageMessage) {
@@ -42,53 +47,77 @@ module.exports = {
 
         if (!mediaMsg) {
             await sock.sendMessage(ctx.from, {
-                text: '❌ Envoie une image ou vidéo avec la légende !sticker [texte optionnel]\nOu réponds à un média avec !sticker [texte]'
+                text: '❌ Envoie un média avec !sticker [haut|centre|bas] [légende]'
             }, { quoted: msg });
             return;
         }
 
-        // WhatsApp refuse les légendes sur les stickers animés
         const finalCaption = mediaType === 'video' ? '' : caption;
 
         const tmpId = Date.now();
-        const tmpInput = path.join(os.tmpdir(), `stick_${tmpId}`);
         const tmpPng = path.join(os.tmpdir(), `stick_${tmpId}.png`);
         const tmpWebp = path.join(os.tmpdir(), `stick_${tmpId}.webp`);
+        const tmpVideo = path.join(os.tmpdir(), `stick_${tmpId}.mp4`);
 
         try {
-            // ==========================================
-            // 1. TÉLÉCHARGEMENT
-            // ==========================================
             console.log('📥 Téléchargement...');
             const buffer = await downloadMediaMessage(
-                sourceMsg,
-                'buffer',
-                {},
-                {
-                    logger: pino({ level: 'silent' }),
-                    reuploadRequest: sock.updateMediaMessage
-                }
+                sourceMsg, 'buffer', {},
+                { logger: pino({ level: 'silent' }), reuploadRequest: sock.updateMediaMessage }
             );
 
             if (mediaType === 'image') {
-                // ==========================================
-                // IMAGE → STICKER (avec légende optionnelle)
-                // ==========================================
                 console.log('🖼️ Traitement image...');
                 const image = await Jimp.fromBuffer(buffer);
-                image.contain({ w: 512, h: 512 });
 
-                // Ajout de la légende si fournie
+                const origW = image.bitmap.width;
+                const origH = image.bitmap.height;
+                const ratio = origW / origH;
+
+                const side = Math.min(origW, origH);
+                const cropX = Math.floor((origW - side) / 2);
+
+                // ✅ Crop intelligent : position dépend du ratio
+                let cropY;
+                let effectivePosition = position;
+
+                if (position === 'auto') {
+                    if (ratio < 0.7) {
+                        // Portrait étroit (ex : 9:16) → privilégie le HAUT
+                        effectivePosition = 'haut';
+                    } else if (ratio < 1) {
+                        // Portrait normal (ex : 4:5) → légèrement au-dessus du centre
+                        effectivePosition = 'centre-haut';
+                    } else {
+                        // Carré ou paysage → centre
+                        effectivePosition = 'centre';
+                    }
+                }
+
+                if (effectivePosition === 'haut') {
+                    cropY = Math.floor((origH - side) * 0.05); // 5% en haut
+                } else if (effectivePosition === 'centre-haut') {
+                    cropY = Math.floor((origH - side) * 0.3); // 30% en haut
+                } else if (effectivePosition === 'bas') {
+                    cropY = Math.floor((origH - side) * 0.95);
+                } else {
+                    // centre
+                    cropY = Math.floor((origH - side) / 2);
+                }
+
+                console.log(`📐 Crop: ${origW}x${origH} (ratio ${ratio.toFixed(2)}) → ${side}x${side} @ (${cropX},${cropY}) [${effectivePosition}]`);
+
+                image.crop({ x: cropX, y: cropY, w: side, h: side });
+                image.resize({ w: 512, h: 512 });
+
                 if (finalCaption) {
-                    console.log('✏️ Ajout de la légende :', finalCaption);
+                    console.log('✏️ Ajout légende :', finalCaption);
                     await addCaption(image, finalCaption);
                 }
 
-                // Jimp ne sait pas écrire en WebP → PNG puis ffmpeg
                 const pngBuffer = await image.getBuffer('image/png');
                 fs.writeFileSync(tmpPng, pngBuffer);
 
-                console.log('🎨 Conversion PNG → WebP...');
                 execSync(
                     `ffmpeg -y -i "${tmpPng}" -vcodec libwebp -lossless 0 -q:v 80 -preset default -an -vsync 0 "${tmpWebp}"`,
                     { stdio: 'ignore' }
@@ -99,24 +128,37 @@ module.exports = {
                 // VIDÉO → STICKER ANIMÉ
                 // ==========================================
                 console.log('🎬 Traitement vidéo...');
-                const videoPath = `${tmpInput}.mp4`;
-                fs.writeFileSync(videoPath, buffer);
+                fs.writeFileSync(tmpVideo, buffer);
 
-                // Limites WhatsApp : max 3 secondes, max 1 MB, 512x512
-                console.log('🎞️ Conversion vidéo → WebP animé (3s max)...');
+                // Expression ffmpeg pour calculer le cropY
+                // ratio < 0.7 → haut (5%) ; ratio < 1 → centre-haut (30%) ; sinon centre
+                let cropExpr;
+                if (position === 'haut') {
+                    cropExpr = `(ih-min(iw\\,ih))*0.05`;
+                } else if (position === 'bas') {
+                    cropExpr = `(ih-min(iw\\,ih))*0.95`;
+                } else if (position === 'centre') {
+                    cropExpr = `(ih-min(iw\\,ih))/2`;
+                } else {
+                    // auto : crop adaptatif
+                    cropExpr = `if(lt(iw/ih\\,0.7)\\,(ih-min(iw\\,ih))*0.05\\,if(lt(iw/ih\\,1)\\,(ih-min(iw\\,ih))*0.3\\,(ih-min(iw\\,ih))/2))`;
+                }
+
+                const vfFilter = `fps=15,crop=min(iw\\,ih):min(iw\\,ih):(iw-min(iw\\,ih))/2:${cropExpr},scale=512:512`;
+
+                console.log('🎞️ Conversion vidéo → WebP animé (3s, crop adaptatif)...');
                 execSync(
-                    `ffmpeg -y -i "${videoPath}" ` +
+                    `ffmpeg -y -i "${tmpVideo}" ` +
                     `-t 3 ` +
-                    `-vf "fps=15,scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000" ` +
+                    `-vf "${vfFilter}" ` +
                     `-vcodec libwebp -lossless 0 -q:v 50 -preset default -loop 0 -an -vsync 0 ` +
                     `-s 512:512 "${tmpWebp}"`,
                     { stdio: 'ignore' }
                 );
 
-                // Nettoyage du MP4 temporaire
-                try { fs.unlinkSync(videoPath); } catch (_) {}
+                try { fs.unlinkSync(tmpVideo); } catch (_) {}
 
-                // Vérification de la taille (limite WhatsApp : 1 MB)
+                // Vérification taille
                 const stats = fs.statSync(tmpWebp);
                 if (stats.size > 1024 * 1024) {
                     console.log('⚠️ Sticker > 1 MB, recompression...');
@@ -148,6 +190,7 @@ module.exports = {
         } finally {
             try { if (fs.existsSync(tmpPng)) fs.unlinkSync(tmpPng); } catch (_) {}
             try { if (fs.existsSync(tmpWebp)) fs.unlinkSync(tmpWebp); } catch (_) {}
+            try { if (fs.existsSync(tmpVideo)) fs.unlinkSync(tmpVideo); } catch (_) {}
         }
     }
 };
@@ -168,33 +211,24 @@ function buildQuotedSource(msg, quoted, ctx) {
     };
 }
 
-/**
- * Ajoute une légende en bas du sticker avec fond semi-transparent
- * et retour à la ligne automatique.
- */
 async function addCaption(image, caption) {
     const width = image.bitmap.width;
     const height = image.bitmap.height;
 
-    // Chargement des polices Jimp (blanche et noire)
     const fontWhite = await Jimp.loadFont(Jimp.FONT_SANS_32_WHITE);
     const fontWhiteSmall = await Jimp.loadFont(Jimp.FONT_SANS_16_WHITE);
 
-    // Choix de la police selon la longueur du texte
     const font = caption.length > 25 ? fontWhiteSmall : fontWhite;
     const fontSize = caption.length > 25 ? 16 : 32;
     const lineHeight = fontSize + 6;
     const padding = 12;
 
-    // Découpage du texte en lignes qui tiennent dans la largeur
     const maxWidth = width - padding * 2;
     const lines = wrapText(caption, font, maxWidth);
 
-    // Hauteur du bloc légende
     const captionHeight = lines.length * lineHeight + padding * 2;
     const captionY = height - captionHeight;
 
-    // Fond semi-transparent noir derrière le texte
     const black = Jimp.rgbaToInt(0, 0, 0, 180);
     for (let y = captionY; y < height; y++) {
         for (let x = 0; x < width; x++) {
@@ -202,7 +236,6 @@ async function addCaption(image, caption) {
         }
     }
 
-    // Dessin du texte centré
     let y = captionY + padding;
     for (const line of lines) {
         const lineWidth = Jimp.measureText(font, line);
@@ -212,9 +245,6 @@ async function addCaption(image, caption) {
     }
 }
 
-/**
- * Découpe un texte en lignes selon la largeur max.
- */
 function wrapText(text, font, maxWidth) {
     const words = text.split(' ');
     const lines = [];
