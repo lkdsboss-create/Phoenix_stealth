@@ -17,9 +17,9 @@
   "dependencies": {
     "@whiskeysockets/baileys": "latest",
     "express": "^4.19.2",
+    "jimp": "^1.6.1",
     "pino": "^9.0.0",
-    "qrcode-terminal": "^0.12.0",
-    "sharp": "^0.33.4"
+    "qrcode-terminal": "^0.12.0"
   },
   "engines": {
     "node": ">=18.0.0"

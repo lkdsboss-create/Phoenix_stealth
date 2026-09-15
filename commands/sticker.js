@@ -1,5 +1,5 @@
 const { downloadMediaMessage } = require('@whiskeysockets/baileys');
-const sharp = require('sharp');
+const Jimp = require('jimp');
 const pino = require('pino');
 
 module.exports = {
@@ -9,7 +9,6 @@ module.exports = {
     async execute(sock, msg, botState, ctx) {
         console.log('🎨 [STICKER] Commande reçue');
 
-        // Détermine la source : image du message actuel ou image citée
         let imageMsg = null;
         let sourceMsg = msg;
 
@@ -32,7 +31,7 @@ module.exports = {
         }
 
         if (!imageMsg) {
-            await sock.sendMessage(ctx.from, { text: '❌ Envoie ou réponds à une image.' }, { quoted: msg });
+            await sock.sendMessage(ctx.from, { text: '❌ Envoie une image avec la légende !sticker, ou réponds à une image avec !sticker' }, { quoted: msg });
             return;
         }
 
@@ -49,13 +48,10 @@ module.exports = {
             );
 
             console.log('🔄 Conversion en WebP...');
-            const stickerBuffer = await sharp(buffer)
-                .resize(512, 512, {
-                    fit: 'contain',
-                    background: { r: 0, g: 0, b: 0, alpha: 0 }
-                })
-                .webp({ quality: 90 })
-                .toBuffer();
+            const image = await Jimp.read(buffer);
+            // Redimensionne pour tenir dans 512x512 sans déformer
+            image.contain(512, 512);
+            const stickerBuffer = await image.getBufferAsync(Jimp.MIME_WEBP);
 
             console.log('📤 Envoi du sticker...');
             await sock.sendMessage(ctx.from, { sticker: stickerBuffer }, { quoted: msg });
