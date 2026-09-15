@@ -1,4 +1,4 @@
-const { downloadMediaMessage } = require('@whiskeysockets/baileys');
+const { downloadMediaMessage } = require('toxic-baileys');
 const { Jimp } = require('jimp');
 const pino = require('pino');
 const { execSync } = require('child_process');
@@ -6,9 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-// Configuration des métadonnées du pack
-const PACK_NAME = 'Phoenix Stickers';
-const PACK_AUTHOR = 'Phoenix Bot';
+const FONT_PATH = path.join(__dirname, '..', 'assets', 'Roboto-Regular.ttf');
 
 module.exports = {
     name: 'sticker',
@@ -24,7 +22,6 @@ module.exports = {
         }
         const caption = argsCopy.join(' ').trim();
 
-        // Détection média
         let mediaMsg = null;
         let mediaType = null;
         let sourceMsg = msg;
@@ -50,8 +47,7 @@ module.exports = {
 
         if (!mediaMsg) {
             await sock.sendMessage(ctx.from, {
-                text: '❌ Envoie une image ou vidéo avec la légende !sticker [haut|centre|bas] [légende]\n' +
-                      'Ou réponds à un média avec !sticker [texte]'
+                text: '❌ Envoie un média avec !sticker [haut|centre|bas] [légende]'
             }, { quoted: msg });
             return;
         }
@@ -73,9 +69,6 @@ module.exports = {
             );
 
             if (mediaType === 'image') {
-                // ==========================================
-                // IMAGE → STICKER
-                // ==========================================
                 console.log('🖼️ Traitement image...');
                 const image = await Jimp.fromBuffer(buffer);
 
@@ -105,7 +98,7 @@ module.exports = {
                     cropY = Math.floor((origH - side) / 2);
                 }
 
-                console.log(`📐 Crop: ${origW}x${origH} → ${side}x${side} @ (${cropX},${cropY}) [${effectivePosition}]`);
+                console.log(`📐 Crop: ${origW}x${origH} → ${side}x${side} [${effectivePosition}]`);
 
                 image.crop({ x: cropX, y: cropY, w: side, h: side });
                 image.resize({ w: 512, h: 512 });
@@ -114,19 +107,20 @@ module.exports = {
                 fs.writeFileSync(tmpPng, pngBuffer);
 
                 if (finalCaption) {
-                    console.log('✏️ Ajout légende style WhatsApp :', finalCaption);
+                    console.log('✏️ Légende :', finalCaption);
                     addWhatsAppStyleCaption(tmpPng, tmpPngCaption, tmpTxt, finalCaption);
-                    // Ajout des métadonnées EXIF (Pack name + Author)
-                    addStickerMetadata(tmpPngCaption, tmpWebp, PACK_NAME, PACK_AUTHOR);
+                    execSync(
+                        `ffmpeg -y -i "${tmpPngCaption}" -vcodec libwebp -lossless 0 -q:v 80 -preset default -an -vsync 0 "${tmpWebp}"`,
+                        { stdio: 'ignore' }
+                    );
                 } else {
-                    // Ajout des métadonnées EXIF
-                    addStickerMetadata(tmpPng, tmpWebp, PACK_NAME, PACK_AUTHOR);
+                    execSync(
+                        `ffmpeg -y -i "${tmpPng}" -vcodec libwebp -lossless 0 -q:v 80 -preset default -an -vsync 0 "${tmpWebp}"`,
+                        { stdio: 'ignore' }
+                    );
                 }
 
             } else {
-                // ==========================================
-                // VIDÉO → STICKER ANIMÉ
-                // ==========================================
                 console.log('🎬 Traitement vidéo...');
                 fs.writeFileSync(tmpVideo, buffer);
 
@@ -143,19 +137,27 @@ module.exports = {
 
                 const vfFilter = `fps=12,crop=min(iw\\,ih):min(iw\\,ih):(iw-min(iw\\,ih))/2:${cropExpr},scale=512:512`;
 
-                console.log('🎞️ Conversion vidéo → WebP animé (10s max, fps=12)...');
-                // Ajout des métadonnées directement dans la commande ffmpeg
+                console.log('🎞️ Conversion vidéo → WebP animé...');
                 execSync(
                     `ffmpeg -y -i "${tmpVideo}" ` +
                     `-t 10 ` +
                     `-vf "${vfFilter}" ` +
                     `-vcodec libwebp -lossless 0 -q:v 50 -preset default -loop 0 -an -vsync 0 ` +
-                    `-metadata "title=${PACK_NAME}" -metadata "artist=${PACK_AUTHOR}" ` +
                     `-s 512:512 "${tmpWebp}"`,
                     { stdio: 'ignore' }
                 );
 
                 try { fs.unlinkSync(tmpVideo); } catch (_) {}
+
+                const stats = fs.statSync(tmpWebp);
+                if (stats.size > 1024 * 1024) {
+                    console.log('⚠️ Sticker > 1 MB, recompression...');
+                    execSync(
+                        `ffmpeg -y -i "${tmpWebp}" -vcodec libwebp -lossless 0 -q:v 25 -loop 0 -an "${tmpWebp}.tmp" ` +
+                        `&& mv "${tmpWebp}.tmp" "${tmpWebp}"`,
+                        { stdio: 'ignore' }
+                    );
+                }
             }
 
             const stickerBuffer = fs.readFileSync(tmpWebp);
@@ -185,10 +187,6 @@ module.exports = {
     }
 };
 
-// ==========================================
-// HELPERS
-// ==========================================
-
 function buildQuotedSource(msg, quoted, ctx) {
     return {
         key: {
@@ -205,20 +203,6 @@ function addWhatsAppStyleCaption(inputPng, outputPng, txtFile, caption) {
     fs.writeFileSync(txtFile, caption, 'utf-8');
     const fontSize = caption.length > 40 ? 20 : (caption.length > 25 ? 24 : 28);
     const boxBorder = 15;
-    const filter = `drawtext=textfile='${txtFile}':fontfile='${path.join(__dirname, '..', 'assets', 'Roboto-Regular.ttf')}':fontsize=${fontSize}:fontcolor=white:x=(w-text_w)/2:y=h-th-30:box=1:boxcolor=black@0.5:boxborderw=${boxBorder}:line_spacing=6`;
+    const filter = `drawtext=textfile='${txtFile}':fontfile='${FONT_PATH}':fontsize=${fontSize}:fontcolor=white:x=(w-text_w)/2:y=h-th-30:box=1:boxcolor=black@0.5:boxborderw=${boxBorder}:line_spacing=6`;
     execSync(`ffmpeg -y -i "${inputPng}" -vf "${filter}" "${outputPng}"`, { stdio: 'ignore' });
-}
-
-/**
- * Ajoute les métadonnées de pack via ffmpeg.
- * Pour les images : conversion PNG → WebP avec métadonnées.
- * Pour les vidéos : les métadonnées sont déjà injectées dans la commande ffmpeg de conversion.
- */
-function addStickerMetadata(inputImage, outputWebp, packName, authorName) {
-    execSync(
-        `ffmpeg -y -i "${inputImage}" -vcodec libwebp -lossless 0 -q:v 80 -preset default -an -vsync 0 ` +
-        `-metadata "title=${packName}" -metadata "artist=${authorName}" ` +
-        `"${outputWebp}"`,
-        { stdio: 'ignore' }
-    );
 }

@@ -1,9 +1,13 @@
 const { handleCommand } = require('./commands');
+const { captureContact, captureGroup } = require('./contacts');
+const { scheduleGhostDelete } = require('./ghost');
+const { incrementMessagesReceived, incrementCommand } = require('./stats');
 
 const OWNER_NUMBER = process.env.OWNER_NUMBER || '22896081989';
 const PREFIX = '!';
 const STICKER_COMMANDS = ['sticker', 's', 'stiker', 'stikervideo', 'sv'];
 const MEDIA_CACHE_TTL = 60 * 1000;
+const GHOST_EXEMPT = ['ghost', 'menu', 'stats'];
 
 async function handleMessages(sock, m, botState) {
     if (m.type !== 'notify') return;
@@ -11,6 +15,7 @@ async function handleMessages(sock, m, botState) {
     for (const msg of m.messages) {
         if (!msg || !msg.message) continue;
         try {
+            incrementMessagesReceived();
             await processSingleMessage(sock, msg, botState);
         } catch (e) {
             console.error('⚠️ Erreur traitement message:', e.message);
@@ -38,6 +43,23 @@ async function processSingleMessage(sock, msg, botState) {
     const isFromMe = msg.key.fromMe;
     const senderNumber = sender ? sender.split('@')[0].split(':')[0] : '';
 
+    // Capture contacts
+    if (isGroup) {
+        if (!botState.capturedGroups) botState.capturedGroups = new Set();
+        if (!botState.capturedGroups.has(from)) {
+            try {
+                const metadata = await sock.groupMetadata(from);
+                if (metadata?.subject) {
+                    captureGroup(from, metadata.subject);
+                    botState.capturedGroups.add(from);
+                }
+            } catch (e) {}
+        }
+        if (sender && msg.pushName) captureContact(sender, msg.pushName);
+    } else if (!isFromMe && msg.pushName) {
+        captureContact(sender, msg.pushName);
+    }
+
     const isOwner = isFromMe || senderNumber === OWNER_NUMBER;
     if (!isOwner) return;
 
@@ -45,7 +67,6 @@ async function processSingleMessage(sock, msg, botState) {
 
     const hasMedia = messageType === 'imageMessage' || messageType === 'videoMessage';
 
-    // Cache des médias (photos/vidéos)
     if (hasMedia) {
         cacheMedia(botState, senderNumber, msg);
         if (!text) return;
@@ -56,7 +77,15 @@ async function processSingleMessage(sock, msg, botState) {
     const args = text.slice(PREFIX.length).trim().split(/\s+/);
     const commandName = args.shift().toLowerCase();
 
-    // Commande sticker sans média attaché → pioche dans le cache
+    // Compteur statistiques
+    incrementCommand(commandName);
+
+    // Mode fantôme
+    const isExempt = GHOST_EXEMPT.includes(commandName);
+    if (!isExempt) {
+        scheduleGhostDelete(sock, msg, commandName);
+    }
+
     if (STICKER_COMMANDS.includes(commandName) && !hasMedia) {
         const cached = getRecentMedia(botState, senderNumber);
         if (cached.length > 0) {
@@ -81,9 +110,6 @@ async function processSingleMessage(sock, msg, botState) {
     });
 }
 
-// ==========================================
-// GESTION DU CACHE MÉDIAS
-// ==========================================
 function cacheMedia(botState, senderNumber, msg) {
     if (!botState.recentMedia) botState.recentMedia = new Map();
     if (!botState.recentMedia.has(senderNumber)) {

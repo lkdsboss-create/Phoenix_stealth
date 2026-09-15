@@ -1,9 +1,6 @@
-const { downloadContentFromMessage, downloadMediaMessage } = require('@whiskeysockets/baileys');
+const { downloadContentFromMessage, downloadMediaMessage } = require('toxic-baileys');
 const pino = require('pino');
 
-// ==========================================
-// WRAPPERS ET TYPES
-// ==========================================
 const VO_WRAPPERS = ['viewOnceMessageV2Extension', 'viewOnceMessageV2', 'viewOnceMessage'];
 const TRANSPORT = [
     'ephemeralMessage',
@@ -13,10 +10,6 @@ const TRANSPORT = [
     'futureProofMessage'
 ];
 
-/**
- * Déplie récursivement un message en traversant les wrappers.
- * Inspiré de deepUnwrap() de Toxic-MD.
- */
 function deepUnwrap(msg) {
     if (!msg) return null;
     const ALL = [...VO_WRAPPERS, ...TRANSPORT];
@@ -29,31 +22,27 @@ function deepUnwrap(msg) {
     return cur;
 }
 
-/**
- * Extrait le média (image/vidéo/audio) d'un message déplié.
- */
 function pickMedia(inner) {
     if (!inner) return null;
     if (inner.imageMessage) return { type: 'image', msg: inner.imageMessage };
     if (inner.videoMessage) return { type: 'video', msg: inner.videoMessage };
     if (inner.audioMessage) return { type: 'audio', msg: inner.audioMessage };
     if (inner.pttMessage) return { type: 'audio', msg: inner.pttMessage };
+    for (const key of Object.keys(inner)) {
+        if (inner[key] && typeof inner[key] === 'object') {
+            if (inner[key].url || inner[key].directPath) {
+                return { type: key.replace('Message', ''), msg: inner[key] };
+            }
+        }
+    }
     return null;
 }
 
-/**
- * Vérifie si un message est un View Once.
- * Teste les wrappers ET le flag inline.
- */
 function isViewOnce(message) {
     if (!message) return false;
-    
-    // Vérifie les wrappers
     for (const w of VO_WRAPPERS) {
         if (message[w]?.message) return true;
     }
-    
-    // Vérifie le flag inline après dépliage
     const inner = deepUnwrap(message);
     if (inner) {
         if (inner.imageMessage?.viewOnce) return true;
@@ -64,38 +53,26 @@ function isViewOnce(message) {
     return false;
 }
 
-/**
- * Tente de télécharger le média avec plusieurs stratégies successives.
- * La clé : utiliser downloadContentFromMessage en priorité.
- */
 async function grab(sock, mediaMsg, mediaType) {
-    // ==========================================
-    // Stratégie 1 : downloadContentFromMessage (stream)
-    // La méthode la plus fiable pour les View Once
-    // ==========================================
     try {
+        console.log(`🔄 [1/3] downloadContentFromMessage (${mediaType})...`);
         const dlType = mediaType === 'audio' ? 'audio'
                      : mediaType === 'video' ? 'video'
                      : 'image';
-        
-        console.log(`🔄 Tentative via downloadContentFromMessage (${dlType})...`);
         const stream = await downloadContentFromMessage(mediaMsg, dlType);
         const chunks = [];
         for await (const c of stream) chunks.push(c);
         const buf = Buffer.concat(chunks);
         if (buf && buf.length > 0) {
-            console.log(`✅ downloadContentFromMessage OK (${(buf.length / 1024).toFixed(1)} KB)`);
+            console.log(`✅ [1/3] OK (${(buf.length / 1024).toFixed(1)} KB)`);
             return buf;
         }
     } catch (e) {
-        console.log(`⚠️ downloadContentFromMessage échoué: ${e.message}`);
+        console.log(`⚠️ [1/3] Échec: ${e.message}`);
     }
 
-    // ==========================================
-    // Stratégie 2 : downloadMediaMessage classique
-    // ==========================================
     try {
-        console.log('🔄 Tentative via downloadMediaMessage...');
+        console.log('🔄 [2/3] downloadMediaMessage direct...');
         const buf = await downloadMediaMessage(
             { message: { [`${mediaType}Message`]: mediaMsg } },
             'buffer',
@@ -103,19 +80,36 @@ async function grab(sock, mediaMsg, mediaType) {
             { logger: pino({ level: 'silent' }), reuploadRequest: sock.updateMediaMessage }
         );
         if (buf && buf.length > 0) {
-            console.log(`✅ downloadMediaMessage OK (${(buf.length / 1024).toFixed(1)} KB)`);
+            console.log(`✅ [2/3] OK (${(buf.length / 1024).toFixed(1)} KB)`);
             return buf;
         }
     } catch (e) {
-        console.log(`⚠️ downloadMediaMessage échoué: ${e.message}`);
+        console.log(`⚠️ [2/3] Échec: ${e.message}`);
+    }
+
+    try {
+        console.log('🔄 [3/3] downloadMediaMessage avec message factice...');
+        const fakeMsg = {
+            key: { remoteJid: 'status@broadcast', fromMe: false, id: 'x' },
+            message: { [`${mediaType}Message`]: mediaMsg }
+        };
+        const buf = await downloadMediaMessage(
+            fakeMsg,
+            'buffer',
+            {},
+            { logger: pino({ level: 'silent' }), reuploadRequest: sock.updateMediaMessage }
+        );
+        if (buf && buf.length > 0) {
+            console.log(`✅ [3/3] OK (${(buf.length / 1024).toFixed(1)} KB)`);
+            return buf;
+        }
+    } catch (e) {
+        console.log(`⚠️ [3/3] Échec: ${e.message}`);
     }
 
     return null;
 }
 
-// ==========================================
-// COMMANDE
-// ==========================================
 module.exports = {
     name: 'viewonce',
     aliases: ['vv', 'vo', 'capture'],
@@ -134,30 +128,31 @@ module.exports = {
             return;
         }
 
-        console.log('📦 [VIEWONCE] Wrappers du message cité:', Object.keys(quotedMsg).join(', '));
+        console.log('📦 [VIEWONCE] Clés:', Object.keys(quotedMsg).join(', '));
 
-        // Vérifie si c'est un View Once
         if (!isViewOnce(quotedMsg)) {
-            await sock.sendMessage(ctx.from, {
-                text: '❌ Ce message n\'est pas un View Once.'
-            }, { quoted: msg });
-            return;
+            const inner = deepUnwrap(quotedMsg);
+            const media = pickMedia(inner);
+            if (!media) {
+                await sock.sendMessage(ctx.from, {
+                    text: '❌ Ce message n\'est pas un View Once.'
+                }, { quoted: msg });
+                return;
+            }
+            console.log('⚠️ [VIEWONCE] Pas de flag viewOnce mais média détecté → tentative');
         }
 
-        // Déplie le message
         const inner = deepUnwrap(quotedMsg);
         const media = pickMedia(inner);
 
         if (!media) {
             await sock.sendMessage(ctx.from, {
-                text: '⚠️ View Once détecté mais aucun média extractible.\n' +
-                      'WhatsApp a probablement envoyé un stub vide.'
+                text: '⚠️ View Once détecté mais aucun média extractible.'
             }, { quoted: msg });
             return;
         }
 
         console.log(`📦 [VIEWONCE] Type: ${media.type}`);
-        console.log(`📦 [VIEWONCE] viewOnce flag: ${media.msg.viewOnce}`);
 
         try {
             const buffer = await grab(sock, media.msg, media.type);
@@ -171,9 +166,7 @@ module.exports = {
                 return;
             }
 
-            // Prépare le contenu à renvoyer
             const content = { [media.type]: buffer };
-
             if (media.type === 'audio') {
                 content.mimetype = media.msg.mimetype || 'audio/ogg; codecs=opus';
                 content.ptt = media.msg.ptt !== false;
