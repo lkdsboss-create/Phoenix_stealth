@@ -1,5 +1,5 @@
 const express = require('express');
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, jidNormalizedUser } = require('toxic-baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, jidNormalizedUser } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const fs = require('fs');
 const fsPromises = require('fs').promises;
@@ -21,32 +21,15 @@ process.on('unhandledRejection', (reason) => {
 });
 
 // ==========================================
-// 🚫 FILTRE DE LOGS AU PLUS BAS NIVEAU
-// (intercepte libsignal, Baileys, etc.)
+// FILTRE DE LOGS
 // ==========================================
 const FILTER_PATTERNS = [
-    'Closing session:',
-    'Closing open session',
-    'currentRatchet',
-    'SessionEntry',
-    '_chains:',
-    'ephemeralKeyPair:',
-    'lastRemoteEphemeralKey:',
-    'previousCounter:',
-    'rootKey:',
-    'indexInfo:',
-    'baseKey:',
-    'baseKeyType:',
-    'remoteIdentityKey:',
-    'pendingPreKey:',
-    'registrationId:',
-    'chainKey:',
-    'chainType:',
-    'messageKeys:',
-    'signedKeyId:',
-    'preKeyId:',
-    'pubKey:',
-    'privKey:'
+    'Closing session:', 'Closing open session', 'currentRatchet',
+    'SessionEntry', '_chains:', 'ephemeralKeyPair:',
+    'lastRemoteEphemeralKey:', 'previousCounter:', 'rootKey:',
+    'indexInfo:', 'baseKey:', 'baseKeyType:', 'remoteIdentityKey:',
+    'pendingPreKey:', 'registrationId:', 'chainKey:', 'chainType:',
+    'messageKeys:', 'signedKeyId:', 'preKeyId:', 'pubKey:', 'privKey:'
 ];
 
 const originalStdoutWrite = process.stdout.write.bind(process.stdout);
@@ -138,39 +121,34 @@ function scheduleSaveContacts() {
 }
 
 // ==========================================
-// 🚦 QUEUE DE SUBSCRIPTION (rate-limit safe)
+// QUEUE DE SUBSCRIPTION
 // ==========================================
 const subscriptionQueue = [];
 let isProcessingQueue = false;
 let lastSubscribeTime = 0;
-const MIN_SUBSCRIBE_INTERVAL = 200; // 200ms entre chaque subscribe
+const MIN_SUBSCRIBE_INTERVAL = 200;
 
 function enqueueSubscribe(sock, jid) {
     if (!jid) return;
     if (botState.subscribedJids.has(jid)) return;
     if (subscriptionQueue.includes(jid)) return;
-
     subscriptionQueue.push(jid);
-    botState.subscribedJids.add(jid); // marqué immédiatement pour éviter les doublons
-
+    botState.subscribedJids.add(jid);
     if (!isProcessingQueue) processSubscriptionQueue(sock);
 }
 
 async function processSubscriptionQueue(sock) {
     isProcessingQueue = true;
-
     while (subscriptionQueue.length > 0) {
         const jid = subscriptionQueue.shift();
         const now = Date.now();
         const wait = MIN_SUBSCRIBE_INTERVAL - (now - lastSubscribeTime);
         if (wait > 0) await new Promise(r => setTimeout(r, wait));
-
         try {
             await sock.presenceSubscribe(jid);
             lastSubscribeTime = Date.now();
         } catch (e) { }
     }
-
     isProcessingQueue = false;
 }
 
@@ -193,8 +171,6 @@ setInterval(() => {
     }
 }, 3600000);
 
-const WHATSAPP_VERSION = [2, 3000, 1043857760];
-
 // ==========================================
 // CHOIX MODE
 // ==========================================
@@ -216,10 +192,7 @@ function askLoginMode() {
             return;
         }
 
-        const rl = readline.createInterface({
-            input: process.stdin,
-            output: process.stdout
-        });
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
         console.log('\n╔════════════════════════════════════════════════════╗');
         console.log('║  🦅 PHOENIX STEALTH — MODE DE CONNEXION            ║');
@@ -265,7 +238,6 @@ async function startStealthBot() {
         const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
 
         const sock = makeWASocket({
-            version: WHATSAPP_VERSION,
             logger: pino({ level: 'silent' }),
             auth: state,
             markOnlineOnConnect: false,
@@ -280,12 +252,12 @@ async function startStealthBot() {
         botState.currentSock = sock;
         sock.ev.on('creds.update', saveCreds);
 
-        let pairingTimer = null;
-
         sock.ev.on('connection.update', async (update) => {
             const { connection, lastDisconnect, qr } = update;
 
-            // QR (une seule fois par QR unique, et pas après connexion)
+            // ==========================================
+            // QR AFFICHAGE
+            // ==========================================
             if (qr && botState.loginMode === 'qr' && !PROCESS_HAS_CONNECTED) {
                 if (qr !== PROCESS_LAST_QR) {
                     PROCESS_LAST_QR = qr;
@@ -298,42 +270,56 @@ async function startStealthBot() {
                 }
             }
 
-            // Pairing code (une seule fois par processus)
-            if (qr && botState.loginMode === 'pairing'
-                && !sock.authState.creds.registered
-                && !PROCESS_PAIRING_REQUESTED
-                && !PROCESS_HAS_CONNECTED) {
-
+            // ==========================================
+            // PAIRING CODE
+            // ==========================================
+            if (
+                connection === 'connecting' &&
+                botState.loginMode === 'pairing' &&
+                !sock.authState.creds.registered &&
+                !PROCESS_PAIRING_REQUESTED &&
+                !PROCESS_HAS_CONNECTED
+            ) {
                 PROCESS_PAIRING_REQUESTED = true;
+
                 console.log('\n🔢 Mode pairing — demande du code...');
 
-                if (pairingTimer) clearTimeout(pairingTimer);
-                pairingTimer = setTimeout(async () => {
-                    try {
-                        const code = await sock.requestPairingCode(botState.PHONE_NUMBER);
-                        console.log('\n======================================================');
-                        console.log(`🎯 CODE DE JUMELAGE : ${code?.match(/.{1,4}/g)?.join('-')}`);
-                        console.log('======================================================');
-                        console.log('📖 Paramètres → Appareils connectés → Associer');
-                        console.log('   → "Avec un numéro de téléphone" → Tape le code');
-                        console.log('======================================================\n');
-                    } catch (err) {
-                        console.error('❌ Erreur pairing:', err.message);
-                    }
-                }, 5000);
+                try {
+                    const phone = String(botState.PHONE_NUMBER).replace(/\D/g, '');
+                    const code = await sock.requestPairingCode(phone);
+
+                    console.log('\n======================================================');
+                    console.log(`🎯 CODE DE JUMELAGE : ${code?.match(/.{1,4}/g)?.join('-')}`);
+                    console.log('======================================================');
+                    console.log('📖 WhatsApp → Appareils connectés → Associer');
+                    console.log('   → Avec un numéro de téléphone');
+                    console.log('   → Tape le code');
+                    console.log('======================================================\n');
+                } catch (err) {
+                    console.error('❌ Erreur pairing:', err.message);
+                    PROCESS_PAIRING_REQUESTED = false;
+                }
             }
 
+            // ==========================================
+            // FERMETURE
+            // ==========================================
             if (connection === 'close') {
-                if (pairingTimer) clearTimeout(pairingTimer);
                 for (const jid in botState.activeIntervals) clearInterval(botState.activeIntervals[jid]);
                 botState.activeIntervals = {};
                 if (botState.currentSock === sock) botState.currentSock = null;
 
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
                 const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-                console.log(`🔌 Connexion fermée. Code: ${statusCode}`);
+                const isRegistered = sock.authState?.creds?.registered === true;
 
-                if (statusCode === 401 || statusCode === 408 || statusCode === 428) {
+                console.log(`🔌 Connexion fermée. Code: ${statusCode} (registered: ${isRegistered})`);
+
+                // ==========================================
+                // NETTOYAGE UNIQUEMENT sur 401 / 408
+                // ==========================================
+                if ((statusCode === 401 || statusCode === 408) && isRegistered) {
+                    console.log('🧹 Session corrompue → nettoyage');
                     try {
                         if (fs.existsSync(AUTH_DIR)) fs.rmSync(AUTH_DIR, { recursive: true, force: true });
                     } catch (e) { }
@@ -343,6 +329,9 @@ async function startStealthBot() {
                     botState.loginMode = null;
                 }
 
+                // ==========================================
+                // DELAY
+                // ==========================================
                 let delay = 3000;
                 if (statusCode === 440) delay = 15000;
                 if (statusCode === 405 && attemptCount >= MAX_ATTEMPTS) {
@@ -350,6 +339,10 @@ async function startStealthBot() {
                     attemptCount = 0;
                 }
                 if (statusCode === 503) delay = 5000;
+                if (statusCode === 428 && !isRegistered) {
+                    console.log('🔄 428 pendant pairing → reconnexion dans 3s (état conservé)');
+                    delay = 3000;
+                }
 
                 if (shouldReconnect && !reconnectTimer) {
                     reconnectTimer = setTimeout(() => {
@@ -375,7 +368,6 @@ async function startStealthBot() {
             }
         });
 
-        // 📚 HISTORIQUE (capture les contacts SANS subscribe en masse)
         sock.ev.on('messaging-history.set', ({ chats, contacts, messages, isLatest }) => {
             try {
                 let added = 0;
@@ -386,7 +378,6 @@ async function startStealthBot() {
                             added++;
                         }
                     }
-                    // ⚠️ PAS de presenceSubscribe ici → trop de requêtes d'un coup
                 }
                 if (added > 0) {
                     saveContactsNow();
@@ -396,7 +387,6 @@ async function startStealthBot() {
             } catch (e) { }
         });
 
-        // 📇 LID MAPPING (log seulement les NOUVEAUX)
         sock.ev.on('lid-mapping.update', (map) => {
             try {
                 let newOnes = 0;
@@ -412,7 +402,6 @@ async function startStealthBot() {
             } catch (e) { }
         });
 
-        // 📇 CONTACTS (capture noms, subscribe en queue)
         sock.ev.on('contacts.upsert', async (contacts) => {
             let newNames = 0;
             for (const contact of contacts || []) {
@@ -422,7 +411,6 @@ async function startStealthBot() {
                         newNames++;
                     }
                 }
-                // Subscribe en queue lente
                 if (contact.id && !contact.id.endsWith('@g.us')) {
                     enqueueSubscribe(sock, contact.id);
                 }
@@ -433,7 +421,6 @@ async function startStealthBot() {
             }
         });
 
-        // 📡 ABONNEMENT PRÉSENCES uniquement pour les contacts qui écrivent
         sock.ev.on('messages.upsert', async (m) => {
             if (m.type !== 'notify') return;
             for (const msg of m.messages) {
@@ -453,7 +440,6 @@ async function startStealthBot() {
             }
         });
 
-        // 📡 PRÉSENCES
         sock.ev.on('presence.update', ({ id, presences }) => {
             for (const jid in (presences || {})) {
                 const status = presences[jid].lastKnownPresence;
@@ -470,7 +456,6 @@ async function startStealthBot() {
             }
         });
 
-        // 📩 MESSAGES
         sock.ev.on('messages.upsert', async (m) => {
             try {
                 if (m.type !== 'notify') return;
@@ -480,7 +465,6 @@ async function startStealthBot() {
             }
         });
 
-        // 📬 ACCUSÉS
         sock.ev.on('message-receipt.update', (events) => {
             try {
                 handleDeliveryReceipt(events);
