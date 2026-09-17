@@ -1,4 +1,4 @@
-const { downloadMediaMessage } = require('@whiskeysockets/baileys');
+const { downloadMediaMessage } = require('toxic-baileys');
 const { Jimp } = require('jimp');
 const pino = require('pino');
 const { execSync } = require('child_process');

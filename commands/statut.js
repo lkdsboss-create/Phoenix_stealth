@@ -1,4 +1,4 @@
-const { downloadMediaMessage, normalizeMessageContent } = require('@whiskeysockets/baileys');
+const { downloadMediaMessage, normalizeMessageContent } = require('toxic-baileys');
 const pino = require('pino');
 
 function getRealMessage(message) {

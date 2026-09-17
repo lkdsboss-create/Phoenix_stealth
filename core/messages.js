@@ -1,4 +1,4 @@
-const { downloadMediaMessage, jidNormalizedUser } = require('@whiskeysockets/baileys');
+const { downloadMediaMessage, jidNormalizedUser } = require('toxic-baileys');
 const pino = require('pino');
 const fs = require('fs');
 const fsPromises = require('fs').promises;

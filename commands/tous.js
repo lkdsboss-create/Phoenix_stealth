@@ -1,4 +1,4 @@
-const { jidNormalizedUser } = require('@whiskeysockets/baileys');
+const { jidNormalizedUser } = require('toxic-baileys');
 
 module.exports = {
     name: 'tous',

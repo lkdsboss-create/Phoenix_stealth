@@ -1,4 +1,4 @@
-const { downloadMediaMessage } = require('@whiskeysockets/baileys');
+const { downloadMediaMessage } = require('toxic-baileys');
 const pino = require('pino');
 
 async function handleViewOnceReaction(sock, msg, botState, myJid) {
